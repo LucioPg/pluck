@@ -327,4 +327,42 @@ mod tests {
         assert_eq!(state, DownloadState::Cancelled);
         assert!(!dest.exists(), "il file parziale deve essere cancellato");
     }
+
+    #[tokio::test]
+    async fn pause_then_resume_completes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.bin"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(vec![7u8; 500_000])
+                    .insert_header("content-length", "500000")
+                    .set_delay(std::time::Duration::from_secs(1)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let url = format!("{}/file.bin", server.uri());
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let ctl = spawn_download(4, url, None, dest.clone(), tx);
+
+        // Pausa immediata: il task entra in pausa prima di leggere il body
+        ctl.pause.send(true).unwrap();
+        let state = tokio::time::timeout(std::time::Duration::from_secs(3), recv_state(&mut rx))
+            .await
+            .expect("timeout in attesa di Paused");
+        assert_eq!(state, DownloadState::Paused);
+
+        // Mentre in pausa: cancel NON deve arrivare, resume sì
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        ctl.pause.send(false).unwrap();
+
+        let state = tokio::time::timeout(std::time::Duration::from_secs(10), recv_state(&mut rx))
+            .await
+            .expect("timeout in attesa di Completed dopo resume");
+        assert_eq!(state, DownloadState::Completed);
+        assert_eq!(tokio::fs::read(&dest).await.unwrap().len(), 500_000);
+    }
 }
