@@ -1,0 +1,5 @@
+[application]
+name = "ldwhelper"
+
+[bundle]
+icon = ["assets/icon.ico"]
