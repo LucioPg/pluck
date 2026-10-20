@@ -3,6 +3,7 @@
 use crate::download::types::*;
 use futures_util::StreamExt;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch};
@@ -11,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 /// Invia progress solo ogni THROTTLE_BYTES scaricati (riduce rumore sul canale).
 const THROTTLE_BYTES: u64 = 64 * 1024;
 
+/// Da chiamare dentro un runtime tokio (tokio::spawn panica altrimenti) — UI e futuro bridge addon.
 pub fn spawn_download(
     id: DownloadId,
     url: String,
@@ -41,13 +43,13 @@ async fn run_download(
         Attempt::Disconnected { current } if current > 0 => {
             match attempt(&id, &url, &referer, &dest, current, &tx, &cancel, &mut pause_rx).await {
                 Attempt::Completed | Attempt::Cancelled => {}
-                Attempt::Disconnected { .. } => {
+                Attempt::Disconnected { current: newer } => {
                     let _ = tx.send(ProgressMessage {
                         id,
                         state: Some(DownloadState::Failed(
                             "Connessione persa, recovery fallita".into(),
                         )),
-                        current,
+                        current: newer,
                         total: 0,
                     }).await;
                 }
@@ -57,7 +59,9 @@ async fn run_download(
         Attempt::Disconnected { .. } => {
             let _ = tx.send(ProgressMessage {
                 id,
-                state: Some(DownloadState::Failed("Connessione persa".into())),
+                state: Some(DownloadState::Failed(
+                    "Connessione persa o URL non raggiungibile".into(),
+                )),
                 current: 0,
                 total: 0,
             }).await;
@@ -86,7 +90,13 @@ async fn attempt(
     cancel: &CancellationToken,
     pause_rx: &mut watch::Receiver<bool>,  // wait_for/changed: &mut self
 ) -> Attempt {
-    let client = reqwest::Client::new();
+    // Timeout client: connect limita l'handshake TCP/TLS, read_timeout è idle tra
+    // read del body (download lunghi legittimi restano possibili)
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .expect("client");
     let mut request = client.get(url);
     if let Some(r) = referer {
         request = request.header("Referer", r);
@@ -95,9 +105,26 @@ async fn attempt(
         request = request.header("Range", format!("bytes={offset}-"));
     }
 
-    let response = match request.send().await {
-        Ok(r) => r,
-        Err(_) => return Attempt::Disconnected { current: offset },
+    // send cancel-aware: il bottone Annulla deve funzionare anche durante l'handshake
+    let response = tokio::select! {
+        r = request.send() => match r {
+            Ok(resp) => resp,
+            Err(_) => return Attempt::Disconnected { current: offset },
+        },
+        _ = cancel.cancelled() => {
+            // In recovery (offset > 0) il file parziale del primo tentativo esiste
+            // ed è già flushato → va rimosso prima di segnalare il cancel
+            if offset > 0 {
+                let _ = tokio::fs::remove_file(dest).await;
+            }
+            let _ = tx.send(ProgressMessage {
+                id: *id,
+                state: Some(DownloadState::Cancelled),
+                current: 0,
+                total: 0,
+            }).await;
+            return Attempt::Cancelled;
+        }
     };
     let status = response.status();
     if !status.is_success() {
@@ -108,6 +135,29 @@ async fn attempt(
             total: 0,
         }).await;
         return Attempt::FailedAlreadyReported;
+    }
+
+    // 206 non conforme: appendere su una base diversa da offset corromperebbe il file
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        let start_ok = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split('-').next())
+            .and_then(|s| s.strip_prefix("bytes="))
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|start| start == offset);
+        if !start_ok {
+            let _ = tx.send(ProgressMessage {
+                id: *id,
+                state: Some(DownloadState::Failed(format!(
+                    "Server non conforme: Content-Range non inizia a {offset}"
+                ))),
+                current: offset,
+                total: 0,
+            }).await;
+            return Attempt::FailedAlreadyReported;
+        }
     }
 
     // Recovery: server senza Range risponde 200 → riparte da zero (truncate)
@@ -131,14 +181,27 @@ async fn attempt(
     };
     let _ = tx.send(ProgressMessage { id: *id, state: None, current, total }).await;
 
-    let mut file = match OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(current > 0) // recovery 206: append da EOF (== current: mai scritto oltre current)
-        .truncate(current == 0)
-        .open(dest)
-        .await
-    {
+    // open cancel-aware (open è atomico: nessun file parziale intermedio)
+    let opened = {
+        let mut opts = OpenOptions::new();
+        opts.create(true)
+            .write(true)
+            .append(current > 0) // recovery 206: append da EOF (== current: mai scritto oltre current)
+            .truncate(current == 0);
+        tokio::select! {
+            r = opts.open(dest) => r,
+            _ = cancel.cancelled() => {
+                let _ = tx.send(ProgressMessage {
+                    id: *id,
+                    state: Some(DownloadState::Cancelled),
+                    current: 0,
+                    total: 0,
+                }).await;
+                return Attempt::Cancelled;
+            }
+        }
+    };
+    let mut file = match opened {
         Ok(f) => f,
         Err(e) => {
             let _ = tx.send(ProgressMessage {
@@ -155,8 +218,9 @@ async fn attempt(
     let mut last_sent = current.saturating_sub(THROTTLE_BYTES);
 
     loop {
-        // Check pausa a INIZIO loop: copre anche pausa richiesta PRIMA di entrare nel loop
-        // (il guard di select! verrebbe valutato una sola volta e la perderebbe).
+        // Check pausa a INIZIO loop: una pausa arrivata PRIMA del primo select! rende
+        // pause_rx.changed() subito pronto → continue; senza questo check il download
+        // continuerebbe mentre risulta in pausa.
         if !cancel.is_cancelled() && *pause_rx.borrow_and_update() {
             let _ = tx.send(ProgressMessage {
                 id: *id,
@@ -329,6 +393,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_during_handshake_reports_cancelled() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.bin"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(BODY.to_vec())
+                    .insert_header("content-length", BODY.len().to_string())
+                    .set_delay(std::time::Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let url = format!("{}/file.bin", server.uri());
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let ctl = spawn_download(7, url, None, dest.clone(), tx);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await; // send() in attesa risposta
+        ctl.cancel.cancel();
+
+        let state = tokio::time::timeout(std::time::Duration::from_secs(3), recv_state(&mut rx))
+            .await
+            .expect("timeout: cancel durante handshake non effettivo");
+        assert_eq!(state, DownloadState::Cancelled);
+        assert!(!dest.exists());
+    }
+
+    #[tokio::test]
     async fn pause_then_resume_completes() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -355,7 +448,7 @@ mod tests {
             .expect("timeout in attesa di Paused");
         assert_eq!(state, DownloadState::Paused);
 
-        // Mentre in pausa: cancel NON deve arrivare, resume sì
+        // Resume dopo la finestra di pausa: il motore riparte e completa
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         ctl.pause.send(false).unwrap();
 
@@ -419,7 +512,7 @@ mod tests {
         // 2ª risposta (recovery con Range): 206 con la parte restante
         let rest = &BODY[16..];
         let mut second = format!(
-            "HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\n\r\n",
+            "HTTP/1.1 206 Partial Content\r\ncontent-range: bytes=16-31/32\r\ncontent-length: {}\r\n\r\n",
             rest.len()
         )
         .into_bytes();
@@ -441,8 +534,16 @@ mod tests {
 
         // Il recovery deve aver mandato Range: bytes=16- (equivalente del matcher
         // header_regex della versione wiremock del piano)
-        let requests = server.await.unwrap();
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("timeout: server raw non ha chiuso")
+            .unwrap();
         assert_eq!(requests.len(), 2);
+        let first_req = String::from_utf8_lossy(&requests[0]).to_ascii_lowercase();
+        assert!(
+            !first_req.contains("range:"),
+            "la prima richiesta non deve avere Range: {first_req}"
+        );
         let second_req = String::from_utf8_lossy(&requests[1]).to_ascii_lowercase();
         assert!(
             second_req.contains("range: bytes=16-"),
@@ -472,7 +573,15 @@ mod tests {
         // BODY esatto: con append sbagliato sarebbero 16+32=48
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), BODY);
 
-        let requests = server.await.unwrap();
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("timeout: server raw non ha chiuso")
+            .unwrap();
         assert_eq!(requests.len(), 2);
+        let first_req = String::from_utf8_lossy(&requests[0]).to_ascii_lowercase();
+        assert!(
+            !first_req.contains("range:"),
+            "la prima richiesta non deve avere Range: {first_req}"
+        );
     }
 }
