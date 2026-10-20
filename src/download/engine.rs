@@ -191,6 +191,10 @@ async fn attempt(
         tokio::select! {
             r = opts.open(dest) => r,
             _ = cancel.cancelled() => {
+                // Coerenza con il braccio send-cancel: cancel = niente file parziale
+                if offset > 0 {
+                    let _ = tokio::fs::remove_file(dest).await;
+                }
                 let _ = tx.send(ProgressMessage {
                     id: *id,
                     state: Some(DownloadState::Cancelled),
@@ -365,24 +369,48 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_deletes_partial_file() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/file.bin"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_bytes(vec![0u8; 1_000_000])
-                    .insert_header("content-length", "1000000")
-                    .set_delay(std::time::Duration::from_secs(2)),
-            )
-            .mount(&server)
-            .await;
+        // Server raw che invia head + primo blocco del body e poi RESTA in attesa
+        // (socket aperto, nessun dato): il motore scrive su disco e si blocca sul
+        // chunk successivo → il cancel arriva nel braccio del loop, non in send().
+        // (spawn_raw_server qui non basta: chiude lo socket dopo ogni risposta.)
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file.bin", listener.local_addr().unwrap());
+        let _server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Leggi la richiesta fino a fine head (il GET non ha body)
+            let mut buf = Vec::with_capacity(8192);
+            let mut chunk = [0u8; 2048];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000000\r\n\r\n")
+                .await;
+            let _ = sock.write_all(&vec![0u8; 100_000]).await;
+            // Stall: la connessione resta aperta senza inviare altro
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        let url = format!("{}/file.bin", server.uri());
 
         let (tx, mut rx) = mpsc::channel(100);
         let ctl = spawn_download(3, url, None, dest.clone(), tx);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            dest.exists(),
+            "il file parziale deve esistere PRIMA del cancel"
+        );
         ctl.cancel.cancel();
 
         let state = tokio::time::timeout(std::time::Duration::from_secs(5), recv_state(&mut rx))
