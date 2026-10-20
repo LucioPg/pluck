@@ -298,4 +298,33 @@ mod tests {
         assert_eq!(state, DownloadState::Completed);
         // .expect(1) su mock non matchato → wiremock verifica al drop del server (panic se 0 match)
     }
+
+    #[tokio::test]
+    async fn cancel_deletes_partial_file() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.bin"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(vec![0u8; 1_000_000])
+                    .insert_header("content-length", "1000000")
+                    .set_delay(std::time::Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let url = format!("{}/file.bin", server.uri());
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let ctl = spawn_download(3, url, None, dest.clone(), tx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        ctl.cancel.cancel();
+
+        let state = tokio::time::timeout(std::time::Duration::from_secs(5), recv_state(&mut rx))
+            .await
+            .expect("timeout in attesa di Cancelled");
+        assert_eq!(state, DownloadState::Cancelled);
+        assert!(!dest.exists(), "il file parziale deve essere cancellato");
+    }
 }
