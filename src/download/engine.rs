@@ -272,4 +272,30 @@ mod tests {
         assert_eq!(state, DownloadState::Completed);
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), BODY);
     }
+
+    #[tokio::test]
+    async fn referer_header_is_sent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/file.bin"))
+            .and(wiremock::matchers::header("referer", "https://esempio.com"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(BODY.to_vec())
+                    .insert_header("content-length", BODY.len().to_string()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let url = format!("{}/file.bin", server.uri());
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let _ctl = spawn_download(2, url, Some("https://esempio.com".into()), dest, tx);
+
+        let state = recv_state(&mut rx).await;
+        assert_eq!(state, DownloadState::Completed);
+        // .expect(1) su mock non matchato → wiremock verifica al drop del server (panic se 0 match)
+    }
 }
