@@ -365,4 +365,114 @@ mod tests {
         assert_eq!(state, DownloadState::Completed);
         assert_eq!(tokio::fs::read(&dest).await.unwrap().len(), 500_000);
     }
+
+    /// Server TCP "grezzo" per i test di recovery: risponde con le raw response in
+    /// ordine (una per connessione) e chiude lo stream. Necessario al posto di
+    /// wiremock perché il troncamento va simulato per davvero: wiremock incornicia
+    /// sempre il body completo (Full<Bytes>) e con content-length bugiardo hyper
+    /// 1.12 lato server, in debug, ASSERTA il mismatch invece di produrre uno
+    /// stream incompleto. Restituisce (uri, handle) con le richieste ricevute.
+    async fn spawn_raw_server(
+        raw_responses: Vec<Vec<u8>>,
+    ) -> (String, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(raw_responses.len());
+            for resp in raw_responses {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                // Leggi la richiesta fino a fine head (il GET non ha body)
+                let mut buf = Vec::with_capacity(8192);
+                let mut chunk = [0u8; 2048];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(buf);
+                // Scrivi e chiudi. Sulla risposta troncata la chiusura arriva PRIMA
+                // del content-length → errore di stream lato client.
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, &resp).await;
+            }
+            requests
+        });
+        (uri, handle)
+    }
+
+    /// Prima risposta 200: head con content-length pieno ma body troncato a 16 byte
+    fn truncated_first_response() -> Vec<u8> {
+        let mut raw = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", BODY.len())
+            .into_bytes();
+        raw.extend_from_slice(&BODY[..16]);
+        raw
+    }
+
+    #[tokio::test]
+    async fn recovery_range_206_appends() {
+        // 2ª risposta (recovery con Range): 206 con la parte restante
+        let rest = &BODY[16..];
+        let mut second = format!(
+            "HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\n\r\n",
+            rest.len()
+        )
+        .into_bytes();
+        second.extend_from_slice(rest);
+
+        let (url, server) = spawn_raw_server(vec![truncated_first_response(), second]).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let _ctl = spawn_download(5, url, None, dest.clone(), tx);
+
+        let state = tokio::time::timeout(std::time::Duration::from_secs(5), recv_state(&mut rx))
+            .await
+            .expect("timeout: nessun Completed dopo recovery");
+        assert_eq!(state, DownloadState::Completed);
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), BODY);
+
+        // Il recovery deve aver mandato Range: bytes=16- (equivalente del matcher
+        // header_regex della versione wiremock del piano)
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let second_req = String::from_utf8_lossy(&requests[1]).to_ascii_lowercase();
+        assert!(
+            second_req.contains("range: bytes=16-"),
+            "la richiesta di recovery non contiene Range: bytes=16-: {second_req}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_without_range_restarts_from_zero() {
+        // 2ª risposta: 200 COMPLETO (server che ignora Range) → restart da zero
+        let mut second = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", BODY.len())
+            .into_bytes();
+        second.extend_from_slice(BODY);
+
+        let (url, server) = spawn_raw_server(vec![truncated_first_response(), second]).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let _ctl = spawn_download(6, url, None, dest.clone(), tx);
+
+        let state = tokio::time::timeout(std::time::Duration::from_secs(5), recv_state(&mut rx))
+            .await
+            .expect("timeout: nessun Completed dopo recovery no-Range");
+        assert_eq!(state, DownloadState::Completed);
+        // BODY esatto: con append sbagliato sarebbero 16+32=48
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), BODY);
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+    }
 }
