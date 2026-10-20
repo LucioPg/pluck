@@ -15,8 +15,8 @@ pub enum DownloadState {
     Cancelled,
 }
 
-/// url/referer conservati per la card/tooltip e futuro retry — evita dead_code sotto clippy -D
-#[derive(Clone, Debug)]
+/// allow(dead_code) temporaneo: url/referer per tooltip/retry futuri
+#[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
 pub struct DownloadItem {
     pub id: DownloadId,
@@ -29,6 +29,12 @@ pub struct DownloadItem {
     pub total: u64,
 }
 
+impl DownloadItem {
+    pub fn percentage(&self) -> u64 {
+        (self.current * 100).checked_div(self.total).unwrap_or(0)
+    }
+}
+
 /// Messaggio di progresso dal motore alla UI.
 #[derive(Clone, Debug)]
 pub struct ProgressMessage {
@@ -37,16 +43,6 @@ pub struct ProgressMessage {
     pub state: Option<DownloadState>,
     pub current: u64,
     pub total: u64,
-}
-
-impl ProgressMessage {
-    pub fn percentage(&self) -> u64 {
-        if self.total == 0 {
-            0
-        } else {
-            (self.current * 100) / self.total
-        }
-    }
 }
 
 /// Handle restituito alla UI per comandare un download.
@@ -60,21 +56,33 @@ pub struct DownloadControl {
 mod tests {
     use super::*;
 
+    fn test_item(current: u64, total: u64) -> DownloadItem {
+        DownloadItem {
+            id: 1,
+            url: "https://esempio.com/file".into(),
+            referer: None,
+            filename: PathBuf::from("file"),
+            state: DownloadState::Downloading,
+            current,
+            total,
+        }
+    }
+
     #[test]
     fn percentage_basic() {
-        let msg = ProgressMessage { id: 1, state: None, current: 50, total: 200 };
-        assert_eq!(msg.percentage(), 25);
+        let item = test_item(50, 200);
+        assert_eq!(item.percentage(), 25);
     }
 
     #[test]
     fn percentage_zero_total_is_zero() {
-        let msg = ProgressMessage { id: 1, state: None, current: 10, total: 0 };
-        assert_eq!(msg.percentage(), 0);
+        let item = test_item(10, 0);
+        assert_eq!(item.percentage(), 0);
     }
 
     #[test]
     fn percentage_full() {
-        let msg = ProgressMessage { id: 1, state: None, current: 200, total: 200 };
-        assert_eq!(msg.percentage(), 100);
+        let item = test_item(200, 200);
+        assert_eq!(item.percentage(), 100);
     }
 }
