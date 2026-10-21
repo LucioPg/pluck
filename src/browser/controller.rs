@@ -67,32 +67,40 @@ const TITLE_JS: &str = r#"
 
 /// Scout DOM — TICK istantaneo guidato da Rust: il pump loop lo lancia ogni 1s
 /// dopo ogni navigazione (per 20s). Stato in window.__lwSeen (persiste nella
-/// pagina): ogni tick ritorna SOLO i nuovi URL trovati. Il play muted avviene
-/// una volta per video. Niente Promise né postMessage: ExecuteScript ritorna
-/// subito e il risultato arriva al completed handler.
+/// pagina): ogni tick ritorna SOLO i nuovi URL trovati. RICORSIVO negli iframe
+/// same-origin (il player è spesso una pagina embeddata — es. player-x.php);
+/// cross-origin → contentDocument null → skip (quelli li vede il CDP). Il play
+/// muted avviene una volta per video. Niente Promise né postMessage.
 const SCOUT_TICK_JS: &str = r#"
 (function() {
     if (!window.__lwSeen) { window.__lwSeen = {}; window.__lwPlayed = {}; }
     const out = [];
-    document.querySelectorAll('video, video source').forEach(el => {
-        const u = el.currentSrc || el.src || el.getAttribute('src') || '';
-        if (u && !window.__lwSeen[u]) { window.__lwSeen[u] = 1; out.push({ url: u, from_video: true }); }
-    });
-    document.querySelectorAll('a[href]').forEach(a => {
-        const h = a.getAttribute('href') || '';
-        if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !window.__lwSeen[h]) {
-            window.__lwSeen[h] = 1; out.push({ url: h, from_video: false });
-        }
-    });
-    document.querySelectorAll('video').forEach(v => {
-        const key = v.currentSrc || v.src || '';
-        if (v.paused && !window.__lwPlayed[key]) {
-            window.__lwPlayed[key] = 1;
-            v.muted = true;
-            const p = v.play();
-            if (p && p.catch) p.catch(() => {});
-        }
-    });
+    function collect(doc) {
+        if (!doc) return;
+        doc.querySelectorAll('video, video source').forEach(el => {
+            const u = el.currentSrc || el.src || el.getAttribute('src') || '';
+            if (u && !window.__lwSeen[u]) { window.__lwSeen[u] = 1; out.push({ url: u, from_video: true }); }
+        });
+        doc.querySelectorAll('a[href]').forEach(a => {
+            const h = a.getAttribute('href') || '';
+            if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !window.__lwSeen[h]) {
+                window.__lwSeen[h] = 1; out.push({ url: h, from_video: false });
+            }
+        });
+        doc.querySelectorAll('video').forEach(v => {
+            const key = (doc === document ? '' : 'i:') + (v.currentSrc || v.src || '');
+            if (v.paused && !window.__lwPlayed[key]) {
+                window.__lwPlayed[key] = 1;
+                v.muted = true;
+                const p = v.play();
+                if (p && p.catch) p.catch(() => {});
+            }
+        });
+        doc.querySelectorAll('iframe').forEach(f => {
+            try { collect(f.contentDocument); } catch (e) { /* cross-origin */ }
+        });
+    }
+    collect(document);
     return JSON.stringify(out);
 })()
 "#;
