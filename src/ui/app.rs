@@ -145,13 +145,20 @@ pub fn App() -> Element {
                     },
                 }
 
-                // Pane download: elenco unico, alto ~2/3 pagina, scrollabile
-                crate::ui::download_list::DownloadList {
-                    downloads,
-                    controls,
-                    on_open_failed: move |msg: String| {
-                        push_toast(toasts, msg);
-                    },
+                // Separazione netta tra pannello principale e lista
+                div { class: "divider my-0 text-xs uppercase tracking-wide opacity-60",
+                    "Download"
+                }
+
+                // Pane download: wrapper con minimo 1/4 pagina; l'interno scrolla
+                div { class: "flex-1 min-h-[25vh] flex overflow-hidden",
+                    crate::ui::download_list::DownloadList {
+                        downloads,
+                        controls,
+                        on_open_failed: move |msg: String| {
+                            push_toast(toasts, msg);
+                        },
+                    }
                 }
             }
 

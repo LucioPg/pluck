@@ -46,7 +46,7 @@ pub fn DownloadList(
     on_open_failed: EventHandler<String>,
 ) -> Element {
     rsx! {
-        div { class: "flex-1 min-h-[25vh] rounded-box border-2 border-base-300 bg-base-200 p-3 shadow-sm flex flex-col gap-2.5 overflow-y-auto",
+        div { class: "flex-1 w-full rounded-box border-2 border-base-300 bg-base-200 p-3 shadow-sm flex flex-col gap-1.5 overflow-y-auto",
             for item in downloads.read().iter() {
                 DownloadRow {
                     key: "{item.id}",
@@ -128,9 +128,9 @@ fn DownloadRow(
     rsx! {
         div {
             class: if can_open {
-                "cursor-pointer flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1.5 text-xs shadow-sm"
+                "cursor-pointer flex items-center gap-2 rounded-lg bg-base-100 px-3 py-0.5 text-xs shadow-sm"
             } else {
-                "cursor-default flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1.5 text-xs shadow-sm"
+                "cursor-default flex items-center gap-2 rounded-lg bg-base-100 px-3 py-0.5 text-xs shadow-sm"
             },
             ondoubleclick: open_file,
             {badge}

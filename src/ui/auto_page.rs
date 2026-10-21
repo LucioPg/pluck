@@ -152,6 +152,15 @@ pub fn AutoPage(
                     },
                 }
                 button {
+                    class: "btn btn-sm btn-ghost",
+                    aria_label: "Cancella indirizzo",
+                    title: "Cancella il campo indirizzo",
+                    onclick: move |_| {
+                        address.set(String::new());
+                    },
+                    "✕"
+                }
+                button {
                     class: "btn btn-sm btn-primary",
                     disabled: address.read().trim().is_empty() || !url_ok,
                     onclick: go,
