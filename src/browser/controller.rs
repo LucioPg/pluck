@@ -112,8 +112,10 @@ fn browser_thread(
     // Tutto il corpo è COM: un solo blocco unsafe (edition 2024: le unsafe fn
     // non permettono più op unsafe implicite nel body)
     unsafe {
+    eprintln!("[browser] thread avviato: hwnd={parent_hwnd}, profilo={}", user_data_dir.display());
     // S_FALSE (già inizializzata) arriva come Ok: solo gli errori veri bloccano
     if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+        eprintln!("[browser] ERRORE: CoInitializeEx fallita");
         let _ = events.send(BrowserEvent::Error("CoInitializeEx: COM non disponibile".into()));
         return;
     }
@@ -122,6 +124,7 @@ fn browser_thread(
 
     let environment = {
         let (tx, rx) = std::sync::mpsc::channel();
+        eprintln!("[browser] creazione environment (profilo dedicato)…");
         if let Err(e) = CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
             Box::new(move |handler| {
                 CreateCoreWebView2EnvironmentWithOptions(
@@ -143,8 +146,12 @@ fn browser_thread(
             return;
         }
         match rx.recv() {
-            Ok(Some(env)) => env,
+            Ok(Some(env)) => {
+                eprintln!("[browser] environment creato");
+                env
+            }
             _ => {
+                eprintln!("[browser] ERRORE: environment nullo");
                 let _ = events.send(BrowserEvent::Error("WebView2: environment nullo".into()));
                 return;
             }
@@ -153,6 +160,7 @@ fn browser_thread(
 
     let controller = {
         let (tx, rx) = std::sync::mpsc::channel();
+        eprintln!("[browser] creazione controller su HWND padre…");
         if let Err(e) = CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
             Box::new(move |handler| {
                 environment
@@ -169,8 +177,12 @@ fn browser_thread(
             return;
         }
         match rx.recv() {
-            Ok(Some(ctl)) => ctl,
+            Ok(Some(ctl)) => {
+                eprintln!("[browser] controller creato");
+                ctl
+            }
             _ => {
+                eprintln!("[browser] ERRORE: controller nullo");
                 let _ = events.send(BrowserEvent::Error("WebView2: controller nullo".into()));
                 return;
             }
@@ -185,9 +197,11 @@ fn browser_thread(
     let _ = controller.SetBounds(client);
 
     let Ok(webview) = controller.CoreWebView2() else {
+        eprintln!("[browser] ERRORE: CoreWebView2 assente");
         let _ = events.send(BrowserEvent::Error("WebView2: CoreWebView2 assente".into()));
         return;
     };
+    eprintln!("[browser] CoreWebView2 pronto");
 
     // Politiche di sicurezza (spec §2): niente popup, permessi negati, download
     // nativi annullati (il download passa da noi), NESSUN host object esposto.
@@ -229,7 +243,9 @@ fn browser_thread(
             if let Some(webview) = webview {
                 let mut uri = PWSTR::null();
                 if webview.Source(&mut uri).is_ok() {
-                    let _ = url_events.send(BrowserEvent::PageUrl(take_pwstr(uri)));
+                    let url = take_pwstr(uri);
+                    eprintln!("[browser] SourceChanged: {url}");
+                    let _ = url_events.send(BrowserEvent::PageUrl(url));
                 }
             }
             Ok(())
@@ -243,6 +259,7 @@ fn browser_thread(
         &NavigationCompletedEventHandler::create(Box::new({
             let title_webview = webview.clone();
             move |_webview, _args| {
+                eprintln!("[browser] navigazione completata: estraggo titolo + autoplay");
                 let title_events = title_events.clone();
                 title_webview.ExecuteScript(
                     &HSTRING::from(TITLE_JS),
@@ -251,6 +268,7 @@ fn browser_thread(
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
                             && let Some(title) = v.as_str()
                         {
+                            eprintln!("[browser] titolo: {title}");
                             let _ = title_events.send(BrowserEvent::Title(title.to_string()));
                         }
                         Ok(())
@@ -273,12 +291,17 @@ fn browser_thread(
         &HSTRING::from("Network.enable"),
         &HSTRING::from("{}"),
         &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|error_code, _json| {
+            match &error_code {
+                Ok(()) => eprintln!("[browser] Network.enable ok"),
+                Err(e) => eprintln!("[browser] ERRORE Network.enable: {e}"),
+            }
             error_code
         })),
     );
     if let Ok(receiver) =
         webview.GetDevToolsProtocolEventReceiver(&HSTRING::from("Network.responseReceived"))
     {
+        eprintln!("[browser] receiver Network.responseReceived registrato");
         let cdp_events = events.clone();
         let mut candidates = CandidateSet::new(500);
         let _ = receiver.add_DevToolsProtocolEventReceived(
@@ -293,6 +316,10 @@ fn browser_thread(
                                     candidate_from_response_received(&value)
                                 && candidates.insert(&candidate)
                             {
+                                eprintln!(
+                                    "[browser] candidato: {} (stream={})",
+                                    candidate.url, candidate.is_stream
+                                );
                                 let _ = cdp_events.send(BrowserEvent::Candidate(candidate));
                             }
                         }
@@ -302,14 +329,18 @@ fn browser_thread(
             )),
             &mut 0,
         );
+    } else {
+        eprintln!("[browser] ERRORE: GetDevToolsProtocolEventReceiver fallita");
     }
 
+    eprintln!("[browser] navigo about:blank (init completata)");
     let _ = webview.Navigate(&HSTRING::from("about:blank"));
 
     // Loop comandi + pump messaggi COM (spec §4). I comandi arrivano solo dal
     // canale; i messaggi Windows servono alle async op interne di WebView2.
     loop {
         while let Ok(cmd) = rx.try_recv() {
+            eprintln!("[browser] comando: {cmd:?}");
             exec(&controller, &webview, cmd);
         }
         let mut msg = MSG::default();

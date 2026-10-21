@@ -42,6 +42,7 @@ pub fn AutoPage(
     let bs_init = browser_state.clone();
     use_effect(move || {
         if *active.read() && !initialized.get() {
+            eprintln!("[auto] prima attivazione tab: init browser");
             initialized.set(true);
             init_browser(
                 bs_init.clone(),
@@ -245,8 +246,12 @@ fn navigate(
     load_error.set(None);
     candidates.write().clear();
     page_title.set(String::new());
-    if let Some(handle) = browser_state.borrow().as_ref() {
-        handle.navigate(&url);
+    match browser_state.borrow().as_ref() {
+        Some(handle) => {
+            eprintln!("[auto] navigate: {url}");
+            handle.navigate(&url);
+        }
+        None => eprintln!("[auto] ATTENZIONE: handle browser assente, navigate ignorata"),
     }
 }
 
@@ -266,6 +271,7 @@ fn init_browser(
     // tao Window → hwnd (isize, alias di tao su Windows); tao re-esportato da dioxus-desktop
     use dioxus::desktop::tao::platform::windows::WindowExtWindows;
     let hwnd = dx.window.hwnd();
+    eprintln!("[auto] init_browser: hwnd={hwnd}");
 
     let (event_tx, mut event_rx): (
         tokio::sync::mpsc::UnboundedSender<browser::BrowserEvent>,
@@ -279,21 +285,28 @@ fn init_browser(
         while let Some(ev) = event_rx.recv().await {
             match ev {
                 browser::BrowserEvent::Candidate(c) => {
+                    eprintln!("[auto] candidato ricevuto: {} (stream={})", c.url, c.is_stream);
                     let mut list = candidates.write();
                     list.insert(0, c);
                     list.truncate(200);
                 }
                 browser::BrowserEvent::PageUrl(url) => {
+                    eprintln!("[auto] pagina corrente: {url}");
                     page_url.set(url.clone());
                     // La address bar segue la navigazione del browser
                     address.set(url);
                 }
-                browser::BrowserEvent::Title(title) => page_title.set(title),
+                browser::BrowserEvent::Title(title) => {
+                    eprintln!("[auto] titolo ricevuto: {title}");
+                    page_title.set(title)
+                }
                 browser::BrowserEvent::Error(msg) => {
+                    eprintln!("[auto] ERRORE browser: {msg}");
                     load_error.set(Some(msg.clone()));
                     on_error.call(msg);
                 }
             }
         }
+        eprintln!("[auto] canale eventi chiuso (thread browser terminato?)");
     });
 }
