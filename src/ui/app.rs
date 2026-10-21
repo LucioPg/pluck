@@ -52,22 +52,24 @@ pub fn App() -> Element {
 
     let mut start_download = move |url: String, referer: Option<String>, dest: PathBuf| {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-        let ctl = spawn_download(id, url.clone(), referer.clone(), dest.clone(), tx.clone());
+        // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
+        // non è ancora in lista il receiver li scarterebbe (card bloccata su "Download").
+        downloads.write().push(DownloadItem {
+            id,
+            url: url.clone(),
+            referer: referer.clone(),
+            filename: dest.clone(),
+            state: DownloadState::Downloading,
+            current: 0,
+            total: 0,
+        });
+        let ctl = spawn_download(id, url, referer.clone(), dest, tx.clone());
         // Referer preferiti: dedup + move-to-front, poi persistenza JSON.
         // Un errore di salvataggio NON blocca il download (lista resta in memoria).
         if let Some(r) = &referer {
             referer_store.write().record(r);
             let _ = referer_store.read().save();
         }
-        downloads.write().push(DownloadItem {
-            id,
-            url,
-            referer,
-            filename: dest,
-            state: DownloadState::Downloading,
-            current: 0,
-            total: 0,
-        });
         controls.write().insert(id, ctl);
     };
 
