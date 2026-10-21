@@ -26,7 +26,7 @@ pub fn AutoPage(
     // usa solo il manuale). Rc<RefCell> perché condiviso con il task eventi.
     let browser_state: Rc<RefCell<Option<browser::BrowserHandle>>> =
         use_hook(|| Rc::new(RefCell::new(None)));
-    let initialized = use_hook(|| Cell::new(false));
+    let initialized = use_hook(|| Rc::new(Cell::new(false)));
     // Guard anti doppio-click sulla save dialog (Cell: basta, il dialog modale blocca
     // comunque le interazioni; nessuna reattività necessaria)
     let browsing: Rc<Cell<bool>> = use_hook(|| Rc::new(Cell::new(false)));
@@ -40,10 +40,13 @@ pub fn AutoPage(
     let url_ok = reqwest::Url::parse(address.read().trim()).is_ok();
 
     let bs_init = browser_state.clone();
+    let init_flag = initialized.clone();
     use_effect(move || {
-        if *active.read() && !initialized.get() {
-            eprintln!("[auto] prima attivazione tab: init browser");
-            initialized.set(true);
+        let now = *active.read();
+        eprintln!("[auto] effect: active={now}, init_done={}", init_flag.get());
+        if now && !init_flag.get() {
+            init_flag.set(true);
+            eprintln!("[auto] prima attivazione tab: init browser (da effect)");
             init_browser(
                 bs_init.clone(),
                 address,
@@ -57,8 +60,17 @@ pub fn AutoPage(
     });
 
     let bs_go = browser_state.clone();
+    let init_go = (
+        initialized.clone(),
+        address,
+        candidates,
+        page_url,
+        page_title,
+        load_error,
+        on_error,
+    );
     let go = move |_| {
-        navigate(&bs_go, address, candidates, page_title, load_error);
+        navigate(&bs_go, &init_go);
     };
 
     // Click su candidato: save dialog nativa precompilata → download.
@@ -130,15 +142,18 @@ pub fn AutoPage(
                     oninput: move |e| address.set(e.value()),
                     onkeydown: {
                         let bs = browser_state.clone();
+                        let init = (
+                            initialized.clone(),
+                            address,
+                            candidates,
+                            page_url,
+                            page_title,
+                            load_error,
+                            on_error,
+                        );
                         move |e| {
                             if e.key() == Key::Enter {
-                                navigate(
-                                    &bs,
-                                    address,
-                                    candidates,
-                                    page_title,
-                                    load_error,
-                                );
+                                navigate(&bs, &init);
                             }
                         }
                     },
@@ -232,21 +247,53 @@ fn candidate_row(
 }
 
 /// Naviga: reset candidati/stato e comando Navigate al thread browser.
+/// Stato necessario all'init lazy, condiviso tra effect e navigate.
+type InitState = (
+    Rc<Cell<bool>>,
+    Signal<String>,
+    Signal<Vec<browser::MediaCandidate>>,
+    Signal<String>,
+    Signal<String>,
+    Signal<Option<String>>,
+    EventHandler<String>,
+);
+
+/// Naviga: init lazy se necessario, reset candidati/stato, comando Navigate.
+/// L'init qui è la cintura di sicurezza: se l'use_effect non si ri-attiva al
+/// cambio tab (tracking), il primo "Vai" inita comunque il browser.
 fn navigate(
     browser_state: &Rc<RefCell<Option<browser::BrowserHandle>>>,
-    address: Signal<String>,
-    mut candidates: Signal<Vec<browser::MediaCandidate>>,
-    mut page_title: Signal<String>,
-    mut load_error: Signal<Option<String>>,
+    init: &InitState,
 ) {
+    let (initialized, address, candidates, page_url, page_title, load_error, on_error) = init;
+    // Copie dei Signal: set/write vogliono binding mut (KB dioxus)
+    let address = *address;
+    let mut candidates = *candidates;
+    let mut page_title = *page_title;
+    let mut load_error = *load_error;
+    if browser_state.borrow().is_none() {
+        if initialized.get() {
+            eprintln!("[auto] ATTENZIONE: init segnato done ma handle assente — reinizo");
+        }
+        initialized.set(true);
+        eprintln!("[auto] init browser (lazy da navigate)");
+        init_browser(
+            browser_state.clone(),
+            address,
+            candidates,
+            *page_url,
+            page_title,
+            load_error,
+            *on_error,
+        );
+    }
     let url = address.read().trim().to_string();
     if reqwest::Url::parse(&url).is_err() {
         return;
     }
     load_error.set(None);
     candidates.write().clear();
-    page_title.set(String::new());
-    match browser_state.borrow().as_ref() {
+    page_title.set(String::new());    match browser_state.borrow().as_ref() {
         Some(handle) => {
             eprintln!("[auto] navigate: {url}");
             handle.navigate(&url);
