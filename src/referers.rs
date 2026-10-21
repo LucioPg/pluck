@@ -38,6 +38,13 @@ impl RefererStore {
         self.entries.insert(0, r);
     }
 
+    /// Rimozione esatta. `false` se assente. NON salva su disco: chiamare `save()`.
+    pub fn remove(&mut self, referer: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e != referer);
+        self.entries.len() != before
+    }
+
     /// L'UI può ignorare il Result: il file si riscriverà al prossimo save (best-effort).
     pub fn save(&self) -> Result<(), String> {
         if let Some(dir) = self.path.parent() {
@@ -99,5 +106,24 @@ mod tests {
         store.save().unwrap();
         let reloaded = RefererStore::load(p);
         assert_eq!(reloaded.list(), &["https://esempio.com".to_string()]);
+    }
+
+    #[test]
+    fn remove_existing_returns_true_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RefererStore::load(dir.path().join("referers.json"));
+        store.record("https://a.com");
+        store.record("https://b.com");
+        assert!(store.remove("https://a.com"));
+        assert_eq!(store.list(), &["https://b.com".to_string()]);
+    }
+
+    #[test]
+    fn remove_missing_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RefererStore::load(dir.path().join("referers.json"));
+        store.record("https://a.com");
+        assert!(!store.remove("https://assente.com"));
+        assert_eq!(store.list().len(), 1);
     }
 }

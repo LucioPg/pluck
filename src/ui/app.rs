@@ -103,6 +103,17 @@ pub fn App() -> Element {
                             toasts.write().retain(|t| t != &msg);
                         });
                     },
+                    on_save_referer: move |r: String| {
+                        if r.is_empty() {
+                            return;
+                        }
+                        referer_store.write().record(&r);
+                        let _ = referer_store.read().save();
+                    },
+                    on_remove_referer: move |r: String| {
+                        referer_store.write().remove(&r);
+                        let _ = referer_store.read().save();
+                    },
                 }
             }
 

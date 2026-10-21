@@ -10,6 +10,10 @@ pub fn NewDownloadDialog(
     on_submit: EventHandler<(String, Option<String>, PathBuf)>,
     /// riservato: rfd save_file non espone errori (None = annullato); hook per toast futuri
     on_error: EventHandler<String>,
+    /// Salva il contenuto del campo referer come preferito (senza avviare il download)
+    on_save_referer: EventHandler<String>,
+    /// Elimina il referer indicato dai preferiti
+    on_remove_referer: EventHandler<String>,
 ) -> Element {
     // Prop riservata ai toast futuri: rfd non espone errori di save_file.
     let _ = on_error;
@@ -79,29 +83,48 @@ pub fn NewDownloadDialog(
                             value: "{referer}",
                             oninput: move |e| referer.set(e.value()),
                         }
-                        if !referers.is_empty() {
-                            div {
-                                class: if *dropdown_open.read() {
-                                    "dropdown mt-2"
-                                } else {
-                                    "dropdown dropdown-close mt-2"
+                        div { class: "flex items-center gap-2 mt-2",
+                            button {
+                                class: "btn btn-xs",
+                                onclick: move |_| {
+                                    let r = referer.read().trim().to_string();
+                                    if !r.is_empty() {
+                                        on_save_referer(r);
+                                    }
                                 },
+                                "Salva referer"
+                            }
+                            if !referers.is_empty() {
                                 div {
-                                    tabindex: "0",
-                                    role: "button",
-                                    class: "btn btn-xs",
-                                    onclick: move |_| dropdown_open.set(true),
-                                    "Referer salvati ({referers.len()}) ▾"
-                                }
-                                ul { class: "dropdown-content menu bg-base-200 rounded-box z-50 w-80 p-2 shadow-lg",
-                                    for r in referers.iter().cloned() {
-                                        li {
-                                            button {
-                                                onclick: move |_| {
-                                                    referer.set(r.clone());
-                                                    dropdown_open.set(false);
-                                                },
-                                                "{r}"
+                                    class: if *dropdown_open.read() {
+                                        "dropdown"
+                                    } else {
+                                        "dropdown dropdown-close"
+                                    },
+                                    div {
+                                        tabindex: "0",
+                                        role: "button",
+                                        class: "btn btn-xs",
+                                        onclick: move |_| dropdown_open.set(true),
+                                        "Referer salvati ({referers.len()}) ▾"
+                                    }
+                                    ul { class: "dropdown-content menu bg-base-200 rounded-box z-50 w-80 p-2 shadow-lg",
+                                        // Due closure `move` per voce → due copie di `r`
+                                        // (una closure consumerebbe `r` dell'altra).
+                                        for (r, r_del) in referers.iter().cloned().map(|r| (r.clone(), r)) {
+                                            li { class: "flex items-center justify-between gap-2",
+                                                button {
+                                                    onclick: move |_| {
+                                                        referer.set(r.clone());
+                                                        dropdown_open.set(false);
+                                                    },
+                                                    "{r}"
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost btn-xs",
+                                                    onclick: move |_| on_remove_referer(r_del.clone()),
+                                                    "✕"
+                                                }
                                             }
                                         }
                                     }
