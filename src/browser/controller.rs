@@ -35,11 +35,6 @@ use windows::{
 /// true = debug sniffing; false = default.
 const VERBOSE_LOGS: bool = false;
 
-/// Estrazione titolo: priorità all'elemento VICINO al player (i metadati
-/// pagina-level sono inaffidabili: popup, menu, SEO). Percorre anche gli
-/// iframe same-origin (dove vive spesso il player). Chain:
-/// 1. attributi title/data-title del <video>
-/// 2. heading/p precedente al <video> (nel documento del player)
 /// Estrazione titolo: priorita' all'elemento vicino al player. Chain completa:
 /// 1. attributi title/data-title del <video>
 /// 2. heading/p precedente al <video> (documento del player, iframe ricorsivi)
