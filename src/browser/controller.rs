@@ -7,7 +7,7 @@
 //!   c'è nessun loop UI in esecuzione (il reentrancy problem è solo sul main)
 //! - I comandi arrivano da un canale std mpsc, consumato a ogni giro di pump
 
-use super::sniff::{CandidateSet, candidate_from_response_received};
+use super::sniff::{CandidateSet, candidate_from_response_received, classify_dom};
 use super::{BrowserCommand, BrowserEvent, BrowserHandle};
 use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedSender;
@@ -16,8 +16,8 @@ use webview2_com::{
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
     DevToolsProtocolEventReceivedEventHandler, DownloadStartingEventHandler,
     ExecuteScriptCompletedHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationCompletedEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler, SourceChangedEventHandler, take_pwstr,
+    NavigationCompletedEventHandler, NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
+    SourceChangedEventHandler, WebMessageReceivedEventHandler, take_pwstr,
 };
 use windows::{
     core::{HSTRING, Interface, PCWSTR, PWSTR},
@@ -65,23 +65,34 @@ const TITLE_JS: &str = r#"
 })()
 "#;
 
-/// Autoplay muted con retry: il browser è invisibile (scelta utente: background
-/// puro) quindi nessuno cliccherà mai "play" — senza questo, molti player non
-/// avviano il fetch dei media e lo sniffing non vede nulla. 6 retry × 1s coprono
-/// i player che costruiscono il <video> dopo il boot JS.
-const PLAY_JS: &str = r#"
+/// Scout DOM: il play forzato NON basta (autoplay spesso negato senza user
+/// activation e molti player hanno preload assente → zero fetch → zero eventi
+/// CDP). Questo script raccoglie gli URL media DIRETTAMENTE dal DOM live:
+/// video src/currentSrc (+ <source>) e link con estensione video, e li invia
+/// via postMessage. Include il play muted (player JS che fetchano solo al play).
+/// 12 tick × 1s: copre i player che costruiscono il <video> dopo il boot JS.
+const DOM_SCOUT_JS: &str = r#"
 (function() {
+    const seen = {};
     let n = 0;
     const t = setInterval(() => {
         n += 1;
-        document.querySelectorAll('video').forEach(v => {
-            if (v.paused) {
-                v.muted = true;
-                const p = v.play();
-                if (p && p.catch) p.catch(() => {});
+        const out = [];
+        document.querySelectorAll('video, video source').forEach(el => {
+            let u = el.currentSrc || el.src || el.getAttribute('src') || '';
+            if (u && !seen[u]) { seen[u] = 1; out.push({ url: u, from_video: true }); }
+        });
+        document.querySelectorAll('a[href]').forEach(a => {
+            const h = a.getAttribute('href') || '';
+            if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !seen[h]) {
+                seen[h] = 1; out.push({ url: h, from_video: false });
             }
         });
-        if (n >= 6) clearInterval(t);
+        document.querySelectorAll('video').forEach(v => {
+            if (v.paused) { v.muted = true; const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+        });
+        if (out.length) window.chrome.webview.postMessage(JSON.stringify(out));
+        if (n >= 12) clearInterval(t);
     }, 1000);
 })()
 "#;
@@ -275,7 +286,7 @@ fn browser_thread(
                     })),
                 )?;
                 let _ = title_webview.ExecuteScript(
-                    &HSTRING::from(PLAY_JS),
+                    &HSTRING::from(DOM_SCOUT_JS),
                     &ExecuteScriptCompletedHandler::create(Box::new(|error_code, _json| {
                         error_code
                     })),
@@ -321,7 +332,9 @@ fn browser_thread(
     {
         eprintln!("[browser] receiver Network.responseReceived registrato");
         let cdp_events = events.clone();
-        let mut candidates = CandidateSet::new(500);
+        // Dedup CONDIVISO tra CDP e scout DOM (possono vedere lo stesso URL)
+        let candidates = std::rc::Rc::new(std::cell::RefCell::new(CandidateSet::new(500)));
+        let cdp_candidates = candidates.clone();
         let _ = receiver.add_DevToolsProtocolEventReceived(
             &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
                 move |_webview, args| {
@@ -339,7 +352,7 @@ fn browser_thread(
                                 }
                                 if let Some(candidate) =
                                     candidate_from_response_received(&value)
-                                    && candidates.insert(&candidate)
+                                    && cdp_candidates.borrow_mut().insert(&candidate)
                                 {
                                     eprintln!(
                                         "[browser] candidato: {} (stream={})",
@@ -353,6 +366,45 @@ fn browser_thread(
                     Ok(())
                 },
             )),
+            &mut 0,
+        );
+
+        // Scout DOM: i messaggi postati da DOM_SCOUT_JS — src del player anche
+        // senza fetch (copre preload assente e autoplay negato)
+        let dom_events = events.clone();
+        let dom_candidates = candidates.clone();
+        let _ = webview.add_WebMessageReceived(
+            &WebMessageReceivedEventHandler::create(Box::new(move |_webview, args| {
+                if let Some(args) = args {
+                    let mut json = PWSTR::null();
+                    if args.WebMessageAsJson(&mut json).is_ok() {
+                        let json = take_pwstr(json);
+                        // WebMessageAsJson = stringa JSON-encoded → decodifica
+                        if let Ok(payload) = serde_json::from_str::<String>(&json)
+                            && let Ok(items) =
+                                serde_json::from_str::<Vec<serde_json::Value>>(&payload)
+                        {
+                            for item in items {
+                                if let Some(url) = item["url"].as_str() {
+                                    let from_video = item["from_video"].as_bool().unwrap_or(false);
+                                    eprintln!("[browser] DOM scout: {url}");
+                                    if let Some(candidate) = classify_dom(url, from_video)
+                                        && dom_candidates.borrow_mut().insert(&candidate)
+                                    {
+                                        eprintln!(
+                                            "[browser] candidato: {} (stream={})",
+                                            candidate.url, candidate.is_stream
+                                        );
+                                        let _ =
+                                            dom_events.send(BrowserEvent::Candidate(candidate));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })),
             &mut 0,
         );
     } else {

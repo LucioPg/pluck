@@ -49,11 +49,31 @@ fn stream(url: &str, _kind: &str) -> MediaCandidate {
     MediaCandidate { url: url.into(), is_stream: true }
 }
 
+/// Classifica un URL raccolto dal DOM (scout JS, niente mime né resourceType).
+/// `from_video` = proviene da `<video>`/`<source>`: è un media anche SENZA
+/// estensione (es. proxy PHP tipo `player-x.php?q=…` che streamma il file).
 fn video_extension(url_lower: &str) -> bool {
     let path = url_lower.split(['?', '#']).next().unwrap_or(url_lower);
     [".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".ts"]
         .iter()
         .any(|ext| path.ends_with(ext))
+}
+
+pub fn classify_dom(url: &str, from_video: bool) -> Option<MediaCandidate> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return None;
+    }
+    let url_lower = url.to_ascii_lowercase();
+    if url_lower.ends_with(".m3u8") {
+        return Some(stream(url, "m3u8"));
+    }
+    if url_lower.ends_with(".mpd") {
+        return Some(stream(url, "mpd"));
+    }
+    if from_video || video_extension(&url_lower) {
+        return Some(MediaCandidate { url: url.into(), is_stream: false });
+    }
+    None
 }
 
 /// Raccolta dedup con cap: il thread browser inoltra all'UI solo i candidati nuovi.
@@ -194,5 +214,32 @@ mod tests {
         let c = MediaCandidate { url: "https://a.com/3".into(), is_stream: false };
         assert!(!set.insert(&c), "cap raggiunto: inoltro bloccato");
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn dom_video_src_without_extension_is_candidate() {
+        // proxy PHP che streamma il video: nessuna estensione ma è src del <video>
+        let c = classify_dom(
+            "https://sito.com/player-x.php?q=cG9zdF9pZA%3D%3D",
+            true,
+        )
+        .expect("candidato atteso");
+        assert!(!c.is_stream);
+    }
+
+    #[test]
+    fn dom_link_only_with_video_extension() {
+        let c = classify_dom("https://sito.com/clip.mp4?token=1", false).expect("atteso");
+        assert!(!c.is_stream);
+        assert!(classify_dom("https://sito.com/pagina.html", false).is_none());
+        assert!(classify_dom("https://sito.com/thumb.jpg", false).is_none());
+    }
+
+    #[test]
+    fn dom_m3u8_is_stream() {
+        let c = classify_dom("https://sito.com/hls/index.m3u8", true).expect("atteso");
+        assert!(c.is_stream);
+        // blob: (MSE) non scaricabile → scartato, lo prende il CDP
+        assert!(classify_dom("blob:https://sito.com/1234", true).is_none());
     }
 }
