@@ -286,18 +286,36 @@ fn browser_thread(
         &mut 0,
     );
 
-    // Sniffing CDP: Network.enable + eventi responseReceived (spec §5)
-    let _ = webview.CallDevToolsProtocolMethod(
-        &HSTRING::from("Network.enable"),
-        &HSTRING::from("{}"),
-        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|error_code, _json| {
-            match &error_code {
-                Ok(()) => eprintln!("[browser] Network.enable ok"),
-                Err(e) => eprintln!("[browser] ERRORE Network.enable: {e}"),
+    // Sniffing CDP (spec §5). ATTENZIONE ALL'ORDINE: Network.enable deve essere
+    // COMPLETATO prima di qualsiasi navigazione — le richieste della pagina
+    // (incluso il fetch preload del <video>) altrimenti avvengono prima che il
+    // domain sia attivo e gli eventi non arrivano (bug osservato su example:
+    // completamento async arrivato dopo la fine del load).
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = webview.CallDevToolsProtocolMethod(
+            &HSTRING::from("Network.enable"),
+            &HSTRING::from("{}"),
+            &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |error_code, _json| {
+                match &error_code {
+                    Ok(()) => eprintln!("[browser] Network.enable completato"),
+                    Err(e) => eprintln!("[browser] ERRORE Network.enable: {e}"),
+                }
+                let _ = tx.send(error_code);
+                Ok(())
+            })),
+        );
+        match webview2_com::wait_with_pump(rx) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("[browser] ERRORE Network.enable (protocollo): {e}");
+                let _ = events.send(BrowserEvent::Error(format!("Network.enable: {e}")));
             }
-            error_code
-        })),
-    );
+            Err(e) => {
+                eprintln!("[browser] ERRORE attesa Network.enable: {e}");
+            }
+        }
+    }
     if let Ok(receiver) =
         webview.GetDevToolsProtocolEventReceiver(&HSTRING::from("Network.responseReceived"))
     {
@@ -311,16 +329,24 @@ fn browser_thread(
                         let mut json = PWSTR::null();
                         if args.ParameterObjectAsJson(&mut json).is_ok() {
                             let json = take_pwstr(json);
-                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
-                                && let Some(candidate) =
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                                if let Some(url) =
+                                    value["response"]["url"].as_str().map(|u| {
+                                        u.chars().take(140).collect::<String>()
+                                    })
+                                {
+                                    eprintln!("[browser] CDP response: {url}");
+                                }
+                                if let Some(candidate) =
                                     candidate_from_response_received(&value)
-                                && candidates.insert(&candidate)
-                            {
-                                eprintln!(
-                                    "[browser] candidato: {} (stream={})",
-                                    candidate.url, candidate.is_stream
-                                );
-                                let _ = cdp_events.send(BrowserEvent::Candidate(candidate));
+                                    && candidates.insert(&candidate)
+                                {
+                                    eprintln!(
+                                        "[browser] candidato: {} (stream={})",
+                                        candidate.url, candidate.is_stream
+                                    );
+                                    let _ = cdp_events.send(BrowserEvent::Candidate(candidate));
+                                }
                             }
                         }
                     }
