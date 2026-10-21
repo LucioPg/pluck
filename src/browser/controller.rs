@@ -446,7 +446,15 @@ fn browser_thread(
     // canale; i messaggi Windows servono alle async op interne di WebView2.
     loop {
         while let Ok(cmd) = rx.try_recv() {
-            eprintln!("[browser] comando: {cmd:?}");
+            // Shutdown gestito qui: Close() rilascia il lock sul profilo, poi il
+            // thread termina (il processo browser di WebView2 si ferma dopo)
+            if let BrowserCommand::Shutdown(ack) = cmd {
+                eprintln!("[browser] shutdown: Close() controller + ack");
+                let _ = controller.Close();
+                let _ = ack.send(());
+                return;
+            }
+            eprintln!("[browser] comando ricevuto");
             exec(&controller, &webview, cmd);
         }
         // Scout DOM a tick (spec §5): ogni 1s fino a 20s dal load, ExecuteScript
@@ -535,6 +543,8 @@ fn exec(
                     bottom: bottom as i32,
                 });
             }
+            // Gestito nel loop (chiude il thread): irraggiungibile qui
+            BrowserCommand::Shutdown(_) => {}
         }
     }
 }

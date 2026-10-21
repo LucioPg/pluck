@@ -333,6 +333,8 @@ fn init_browser(
     ) = tokio::sync::mpsc::unbounded_channel();
 
     let handle = browser::controller::spawn_browser(hwnd, browser::profile_dir(), event_tx);
+    // Handle condiviso per lo shutdown all'uscita (cancellazione profilo)
+    browser::register_shared_browser(&handle);
     *browser_state.borrow_mut() = Some(handle);
 
     spawn(async move {

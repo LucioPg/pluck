@@ -124,6 +124,51 @@ pub fn App() -> Element {
             dialog_open.set(false);
         };
 
+    // Privacy: alla chiusura della finestra → shutdown browser (rilascio lock
+    // profilo) + cancellazione della cartella profilo (cookie/login/cache non
+    // persistono su disco). Retry: il processo browser può rilasciare i file
+    // qualche centinaio di ms dopo il Close().
+    {
+        let dx = dioxus::desktop::window();
+        let cleanup_done = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = cleanup_done.clone();
+        dx.create_wry_event_handler(move |event, _| {
+            if !matches!(
+                event,
+                dioxus::desktop::tao::event::Event::WindowEvent {
+                    event: dioxus::desktop::tao::event::WindowEvent::CloseRequested { .. },
+                    ..
+                }
+            ) || flag.get()
+            {
+                return;
+            }
+            flag.set(true);
+            eprintln!("[exit] chiusura: shutdown browser + cancellazione profilo");
+            if let Some(handle) = crate::browser::shared_browser()
+                && !handle.shutdown_and_wait(std::time::Duration::from_secs(3))
+            {
+                eprintln!("[exit] ack shutdown non arrivato (timeout): procedo comunque");
+            }
+            let profile = crate::browser::profile_dir();
+            for attempt in 0..5 {
+                match std::fs::remove_dir_all(&profile) {
+                    Ok(()) => {
+                        eprintln!("[exit] profilo cancellato ({})", profile.display());
+                        return;
+                    }
+                    Err(e) if attempt < 4 => {
+                        eprintln!("[exit] cancellazione ritentata ({e})");
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                    Err(e) => {
+                        eprintln!("[exit] ERRORE: profilo non cancellato: {e}");
+                    }
+                }
+            }
+        });
+    }
+
     rsx! {
         head { style { "{TAILWIND_CSS}" } }
         div { class: "h-screen overflow-hidden bg-base-100 p-6",

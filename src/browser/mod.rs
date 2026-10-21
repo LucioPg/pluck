@@ -118,7 +118,6 @@ pub enum BrowserEvent {
 /// Comandi UI → thread browser. Tutte le chiamate COM restano sul thread del browser.
 /// `Back`/`SetVisible`/`SetBounds`: pronti per "mostra pagina" (fase futura) —
 /// il protocollo non cambia quando arriveranno.
-#[derive(Clone, Debug)]
 pub enum BrowserCommand {
     Navigate(String),
     Back,
@@ -126,6 +125,8 @@ pub enum BrowserCommand {
     SetVisible(bool),
     /// Rect in px fisici relativi all'area client della finestra padre
     SetBounds(f64, f64, f64, f64),
+    /// Chiusura: Close() del controller + ack (rilascia il lock sul profilo)
+    Shutdown(std::sync::mpsc::Sender<()>),
 }
 
 /// Handle per comandare il browser. I metodi ignorano l'errore di send: se il
@@ -158,6 +159,27 @@ impl BrowserHandle {
     pub fn set_bounds(&self, left: f64, top: f64, right: f64, bottom: f64) {
         let _ = self.tx.send(BrowserCommand::SetBounds(left, top, right, bottom));
     }
+
+    /// Shutdown graceful: Close() del controller + attesa ack (max `timeout`).
+    /// `true` = ack ricevuto → il lock sul profilo è rilasciato.
+    pub fn shutdown_and_wait(&self, timeout: std::time::Duration) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.tx.send(BrowserCommand::Shutdown(tx)).is_err() {
+            return false; // thread già morto: lock comunque rilasciato
+        }
+        rx.recv_timeout(timeout).is_ok()
+    }
+}
+
+/// Handle condiviso per lo shutdown all'uscita (impostato da init_browser).
+static SHARED_BROWSER: std::sync::OnceLock<BrowserHandle> = std::sync::OnceLock::new();
+
+pub fn register_shared_browser(handle: &BrowserHandle) {
+    let _ = SHARED_BROWSER.set(handle.clone());
+}
+
+pub fn shared_browser() -> Option<&'static BrowserHandle> {
+    SHARED_BROWSER.get()
 }
 
 /// Filename suggerito: il titolo del video pulito per Windows.
