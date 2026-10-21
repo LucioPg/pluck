@@ -132,27 +132,41 @@ pub fn App() -> Element {
             div { class: "max-w-2xl mx-auto flex flex-col gap-4",
                 header { class: "flex items-center justify-between gap-4",
                     h1 { class: "text-2xl font-bold shrink-0", "ldwhelper" }
-                    div { class: "tabs tabs-boxed",
+                    // Due tab distinti (bottoni separati, non segmento unico)
+                    div { class: "flex gap-2",
                         button {
-                            class: if !*auto_tab.read() { "tab tab-active" } else { "tab" },
+                            class: if !*auto_tab.read() {
+                                "btn btn-sm btn-primary"
+                            } else {
+                                "btn btn-sm btn-ghost"
+                            },
                             onclick: move |_| auto_tab.set(false),
                             "Manuale"
                         }
                         button {
-                            class: if *auto_tab.read() { "tab tab-active" } else { "tab" },
+                            class: if *auto_tab.read() {
+                                "btn btn-sm btn-primary"
+                            } else {
+                                "btn btn-sm btn-ghost"
+                            },
                             onclick: move |_| auto_tab.set(true),
                             "Automatica"
                         }
                     }
-                    if !*auto_tab.read() {
+                }
+
+                // Contenuto tab Manuale: pulsante di apertura dialog
+                if !*auto_tab.read() {
+                    div { class: "flex justify-center py-2",
                         button {
-                            class: "btn btn-primary shrink-0",
+                            class: "btn btn-primary",
                             onclick: move |_| dialog_open.set(true),
-                            "Nuovo download"
+                            "＋ Nuovo download"
                         }
                     }
                 }
 
+                // Contenuto tab Automatica (browser in background + candidati)
                 crate::ui::auto_page::AutoPage {
                     active: auto_tab,
                     on_download: auto_on_download,
@@ -161,12 +175,21 @@ pub fn App() -> Element {
                     },
                 }
 
-                crate::ui::download_list::DownloadList {
-                    downloads,
-                    controls,
-                    on_open_failed: move |msg: String| {
-                        push_toast(toasts, msg);
-                    },
+                // Lista download CONDIVISA: visibile sotto entrambe le tab
+                div { class: "flex flex-col gap-2",
+                    div { class: "flex items-center gap-2",
+                        h2 { class: "text-lg font-semibold", "Download" }
+                        span { class: "badge badge-neutral", "{downloads.read().len()}" }
+                    }
+                    div { class: "flex flex-col gap-3 max-h-[300px] overflow-y-auto pr-1",
+                        crate::ui::download_list::DownloadList {
+                            downloads,
+                            controls,
+                            on_open_failed: move |msg: String| {
+                                push_toast(toasts, msg);
+                            },
+                        }
+                    }
                 }
             }
 

@@ -19,7 +19,9 @@ pub fn DownloadList(
                 }
             }
             if downloads.read().is_empty() {
-                p { class: "text-center opacity-60", "Nessun download in corso" }
+                div { class: "rounded-box border border-dashed border-base-300 py-6 text-center text-sm opacity-60",
+                    "Nessun download. Usa una delle tab sopra per avviarne uno."
+                }
             }
         }
     }
@@ -72,7 +74,7 @@ fn DownloadCard(
 
     rsx! {
         div {
-            class: "card bg-base-200",
+            class: "card bg-base-200 shadow",
             ondoubleclick: open_file,
             div { class: "card-body gap-2 p-4",
                 div { class: "flex items-center justify-between gap-2",
