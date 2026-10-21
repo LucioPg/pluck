@@ -2,6 +2,40 @@ use crate::download::types::{DownloadControl, DownloadId, DownloadItem, Download
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
+/// Formatta byte in unità leggibili (base 1024): `942 B`, `1.5 MB`, `2.0 GB`…
+fn format_bytes(v: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut val = v as f64;
+    let mut unit = 0usize;
+    while val >= 1024.0 && unit < UNITS.len() - 1 {
+        val /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{v} B")
+    } else {
+        format!("{val:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_bytes;
+
+    #[test]
+    fn format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(942), "942 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_bytes(2 * 1024_u64.pow(3)), "2.0 GB");
+        // oltre TB resta TB
+        let big = 8 * 1024_u64.pow(4);
+        assert!(format_bytes(big).ends_with("TB"));
+    }
+}
+
 /// Pane unico dei download: alto ~2/3 della pagina, scrollabile, a RIGHE
 /// (non card). Badge stato, percentuale e bottoni sempre visibili; il nome
 /// file va in ellipsis se troppo lungo (tooltip col path completo).
@@ -12,7 +46,7 @@ pub fn DownloadList(
     on_open_failed: EventHandler<String>,
 ) -> Element {
     rsx! {
-        div { class: "flex-1 min-h-0 rounded-box border border-base-300 bg-base-200/40 p-3 flex flex-col gap-1 overflow-y-auto",
+        div { class: "flex-1 min-h-[25vh] rounded-box border-2 border-base-300 bg-base-200 p-3 shadow-sm flex flex-col gap-2.5 overflow-y-auto",
             for item in downloads.read().iter() {
                 DownloadRow {
                     key: "{item.id}",
@@ -93,7 +127,11 @@ fn DownloadRow(
 
     rsx! {
         div {
-            class: "flex items-center gap-2 rounded bg-base-100 px-2 py-1 text-xs",
+            class: if can_open {
+                "cursor-pointer flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1.5 text-xs shadow-sm"
+            } else {
+                "cursor-default flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1.5 text-xs shadow-sm"
+            },
             ondoubleclick: open_file,
             {badge}
             // Nome file: ellipsis se lungo, tooltip col path completo
@@ -115,12 +153,12 @@ fn DownloadRow(
                     "{item.percentage()}%"
                 }
             }
-            // Dimensioni: sempre visibili
-            span { class: "tabular-nums opacity-70 shrink-0 w-32 text-right",
+            // Dimensioni: sempre visibili, in unità leggibili
+            span { class: "tabular-nums opacity-70 shrink-0 w-36 text-right",
                 if item.total > 0 {
-                    "{item.current}/{item.total} B"
+                    "{format_bytes(item.current)} / {format_bytes(item.total)}"
                 } else {
-                    "{item.current} B"
+                    "{format_bytes(item.current)}"
                 }
             }
             div { class: "flex gap-1 shrink-0",
