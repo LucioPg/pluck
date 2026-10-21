@@ -14,16 +14,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[component]
 pub fn AutoPage(
-    /// Tab attiva? Solo il display del contenuto: il browser dietro non si tocca.
-    /// Signal perché l'use_effect di init deve ri-triggerare al cambio tab.
-    active: ReadSignal<bool>,
     /// (url, referer, destinazione) — chiamato al termine della save dialog
     on_download: EventHandler<(String, Option<String>, PathBuf)>,
     /// Toast errori (init WebView2, save dialog)
     on_error: EventHandler<String>,
 ) -> Element {
-    // Browser creato LAZY alla prima attivazione della tab (zero costi se l'utente
-    // usa solo il manuale). Rc<RefCell> perché condiviso con il task eventi.
+    // Browser avviato al mount: la vista è sempre visibile (pagina unica).
     let browser_state: Rc<RefCell<Option<browser::BrowserHandle>>> =
         use_hook(|| Rc::new(RefCell::new(None)));
     let initialized = use_hook(|| Rc::new(Cell::new(false)));
@@ -42,11 +38,8 @@ pub fn AutoPage(
     let bs_init = browser_state.clone();
     let init_flag = initialized.clone();
     use_effect(move || {
-        let now = *active.read();
-        eprintln!("[auto] effect: active={now}, init_done={}", init_flag.get());
-        if now && !init_flag.get() {
+        if !init_flag.get() {
             init_flag.set(true);
-            eprintln!("[auto] prima attivazione tab: init browser (da effect)");
             init_browser(
                 bs_init.clone(),
                 address,
@@ -117,7 +110,7 @@ pub fn AutoPage(
 
     rsx! {
         div {
-            class: if *active.read() { "flex flex-col gap-3" } else { "hidden" },
+            class: "flex flex-col gap-3",
 
             div { class: "flex gap-2",
                 button {

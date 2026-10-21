@@ -95,7 +95,20 @@ pub fn App() -> Element {
         tx
     });
 
-    // Chiusura submit manuale: cloni tx per consumer (le props vogliono FnMut)
+    // Chiusure submit: cloni tx per consumer (le props vogliono FnMut)
+    let tx_auto = tx.clone();
+    let auto_on_download =
+        move |(url, referer, dest): (String, Option<String>, PathBuf)| {
+            launch_download(
+                tx_auto.clone(),
+                downloads,
+                controls,
+                referer_store,
+                url,
+                referer,
+                dest,
+            );
+        };
     let tx_manual = tx.clone();
     let manual_on_submit =
         move |(url, referer, dest): (String, Option<String>, PathBuf)| {
@@ -122,6 +135,14 @@ pub fn App() -> Element {
                         onclick: move |_| dialog_open.set(true),
                         "＋ Manuale"
                     }
+                }
+
+                // Sezione automatica: browser in background + candidati (sempre visibile)
+                crate::ui::auto_page::AutoPage {
+                    on_download: auto_on_download,
+                    on_error: move |msg: String| {
+                        push_toast(toasts, msg);
+                    },
                 }
 
                 // Pane download: elenco unico, alto ~2/3 pagina, scrollabile
