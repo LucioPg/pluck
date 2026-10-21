@@ -40,10 +40,26 @@ const VERBOSE_LOGS: bool = false;
 /// iframe same-origin (dove vive spesso il player). Chain:
 /// 1. attributi title/data-title del <video>
 /// 2. heading/p precedente al <video> (nel documento del player)
-/// 3. og:title → twitter:title → h1 → title pulito (solo come fallback)
+/// Estrazione titolo: priorita' all'elemento vicino al player. Chain completa:
+/// 1. attributi title/data-title del <video>
+/// 2. heading/p precedente al <video> (documento del player, iframe ricorsivi)
+/// 3. heading [id/class*="title"] risalendo i padri del player
+/// 4. og:title -> twitter:title -> document.title pulito
+/// 5. h1/h2 FILTRATI anti-disclaimer (per ultimo: il primo h1 e' spesso il
+///    popup/descrizione-eta', caso tranny.one #lawH1 prima di #mTitle)
 const TITLE_JS: &str = r#"
 (function() {
-    function nearVideo(doc) {
+    const BAD_TEXT = /(age[- ]restrict|this website|warning|disclaimer|pornograph|materials may|consent|18\+|entering|by entering)/i;
+    const BAD_SIG = /(law|modal|popup|overlay|consent|agegate|age-gate|disclaimer)/i;
+    function okEl(el) {
+        if (!el) return false;
+        const t = el.textContent.trim();
+        if (!t || t.length > 150) return false;
+        if (BAD_TEXT.test(t)) return false;
+        const sig = (el.id || '') + ' ' + (el.className || '');
+        return !BAD_SIG.test(sig);
+    }
+    function fromVideo(doc) {
         if (!doc) return null;
         for (const v of doc.querySelectorAll('video')) {
             if (v.title && v.title.trim()) return v.title.trim();
@@ -53,27 +69,31 @@ const TITLE_JS: &str = r#"
             for (let i = 0; i < 5; i++) {
                 el = el.previousElementSibling;
                 if (!el) break;
-                if (/^(P|H[1-6])$/.test(el.tagName) && el.textContent.trim()) {
+                if (/^(P|H[1-6])$/.test(el.tagName) && el.textContent.trim() && okEl(el)) {
                     return el.textContent.trim();
                 }
             }
-            const box = v.closest('[class*="player"], [class*="video"], [id*="player"]');
-            if (box) {
-                const h = box.querySelector('h1, h2, h3, h4');
-                if (h && h.textContent.trim()) return h.textContent.trim();
+            let p = v.parentElement;
+            for (let d = 0; p && d < 5; d++, p = p.parentElement) {
+                const t = p.querySelector(
+                    'h1[id*="title" i], h2[id*="title" i], h3[id*="title" i], ' +
+                    '[id*="mtitle" i], [class*="movie-title" i], [class*="video-title" i], ' +
+                    'h1[class*="title" i]'
+                );
+                if (t && okEl(t)) return t.textContent.trim();
             }
         }
         for (const f of doc.querySelectorAll('iframe')) {
             try {
                 if (f.contentDocument) {
-                    const t = nearVideo(f.contentDocument);
+                    const t = fromVideo(f.contentDocument);
                     if (t) return t;
                 }
             } catch (e) { /* cross-origin */ }
         }
         return null;
     }
-    const near = nearVideo(document);
+    const near = fromVideo(document);
     if (near) return near;
     function clean(t) {
         t = (t || '').trim();
@@ -89,9 +109,14 @@ const TITLE_JS: &str = r#"
     if (og && og.content && og.content.trim()) return og.content.trim();
     const tw = document.querySelector('meta[name="twitter:title"]');
     if (tw && tw.content && tw.content.trim()) return tw.content.trim();
-    const h1 = document.querySelector('h1');
-    if (h1 && h1.textContent.trim()) return h1.textContent.trim();
-    return clean(document.title);
+    const dt = clean(document.title);
+    if (dt) return dt;
+    for (const h of document.querySelectorAll('h1, h2')) {
+        if (okEl(h)) return h.textContent.trim();
+    }
+    const any = document.querySelector('h1');
+    if (any) return any.textContent.trim();
+    return '';
 })()
 "#;
 
