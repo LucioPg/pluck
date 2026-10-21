@@ -28,6 +28,10 @@ pub fn NewDownloadDialog(
     let can_start = url_ok && filename_ok;
 
     let browse = move |_| {
+        // guard anti doppio-click: il disabled arriva solo al prossimo render
+        if *browsing.read() {
+            return;
+        }
         let mut dialog = rfd::AsyncFileDialog::new();
         let suggested = filename.read().trim().to_string();
         if !suggested.is_empty() {
