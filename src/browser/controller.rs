@@ -190,6 +190,9 @@ fn browser_thread(
     }
 
     let options = CoreWebView2EnvironmentOptions::default();
+    // Lingua fissa en-US: i siti con subdomain localizzato (it.X.com) devono
+    // restare sul default (scelta utente), non seguire la lingua di Windows
+    options.set_language("en-US".into());
 
     let environment = {
         let (tx, rx) = std::sync::mpsc::channel();
