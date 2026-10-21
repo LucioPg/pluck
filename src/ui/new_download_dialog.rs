@@ -113,7 +113,9 @@ pub fn NewDownloadDialog(
                                         // (una closure consumerebbe `r` dell'altra).
                                         for (r, r_del) in referers.iter().cloned().map(|r| (r.clone(), r)) {
                                             li { class: "flex items-center justify-between gap-2",
+                                                key: "{r}",
                                                 button {
+                                                    class: "min-w-0 truncate text-left",
                                                     onclick: move |_| {
                                                         referer.set(r.clone());
                                                         dropdown_open.set(false);
@@ -122,6 +124,7 @@ pub fn NewDownloadDialog(
                                                 }
                                                 button {
                                                     class: "btn btn-ghost btn-xs",
+                                                    aria_label: "Elimina referer",
                                                     onclick: move |_| on_remove_referer(r_del.clone()),
                                                     "✕"
                                                 }
