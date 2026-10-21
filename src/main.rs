@@ -1,5 +1,8 @@
 //! ldwhelper — desktop download manager.
 
+// Browser automatico fuori UI per scelta UX: codice + spec conservati
+// (docs/superpowers/specs/2026-10-21-embedded-browser-sniffer-design.md)
+#[allow(dead_code)]
 mod browser;
 mod download;
 mod referers;

@@ -62,8 +62,6 @@ pub fn App() -> Element {
     let mut controls = use_signal(HashMap::<DownloadId, DownloadControl>::new);
     let mut dialog_open = use_signal(|| false);
     let toasts = use_signal(Vec::<String>::new);
-    // Tab attiva: false = Manuale (default), true = Automatica
-    let mut auto_tab = use_signal(|| false);
     // Referer preferiti: caricati una sola volta all'avvio da %APPDATA%/ldwhelper/referers.json
     let mut referer_store = use_signal(|| RefererStore::load(RefererStore::default_path()));
 
@@ -97,20 +95,7 @@ pub fn App() -> Element {
         tx
     });
 
-    // Chiusure di submit: cloni tx per consumer (le props vogliono FnMut)
-    let tx_auto = tx.clone();
-    let auto_on_download =
-        move |(url, referer, dest): (String, Option<String>, PathBuf)| {
-            launch_download(
-                tx_auto.clone(),
-                downloads,
-                controls,
-                referer_store,
-                url,
-                referer,
-                dest,
-            );
-        };
+    // Chiusura submit manuale: cloni tx per consumer (le props vogliono FnMut)
     let tx_manual = tx.clone();
     let manual_on_submit =
         move |(url, referer, dest): (String, Option<String>, PathBuf)| {
@@ -132,68 +117,24 @@ pub fn App() -> Element {
             div { class: "max-w-2xl mx-auto flex flex-col gap-4",
                 header { class: "flex items-center justify-between gap-4",
                     h1 { class: "text-2xl font-bold shrink-0", "ldwhelper" }
-                    // Due tab distinti (bottoni separati, non segmento unico)
-                    div { class: "flex gap-2",
-                        button {
-                            class: if !*auto_tab.read() {
-                                "btn btn-sm btn-primary"
-                            } else {
-                                "btn btn-sm btn-ghost"
-                            },
-                            onclick: move |_| auto_tab.set(false),
-                            "Manuale"
-                        }
-                        button {
-                            class: if *auto_tab.read() {
-                                "btn btn-sm btn-primary"
-                            } else {
-                                "btn btn-sm btn-ghost"
-                            },
-                            onclick: move |_| auto_tab.set(true),
-                            "Automatica"
-                        }
+                    button {
+                        class: "btn btn-primary",
+                        onclick: move |_| dialog_open.set(true),
+                        "＋ Manuale"
                     }
                 }
 
-                // Contenuto tab Manuale: pulsante di apertura dialog
-                if !*auto_tab.read() {
-                    div { class: "flex justify-center py-2",
-                        button {
-                            class: "btn btn-primary",
-                            onclick: move |_| dialog_open.set(true),
-                            "＋ Nuovo download"
-                        }
-                    }
-                }
-
-                // Contenuto tab Automatica (browser in background + candidati)
-                crate::ui::auto_page::AutoPage {
-                    active: auto_tab,
-                    on_download: auto_on_download,
-                    on_error: move |msg: String| {
+                // Pane download: elenco unico, alto ~2/3 pagina, scrollabile
+                crate::ui::download_list::DownloadList {
+                    downloads,
+                    controls,
+                    on_open_failed: move |msg: String| {
                         push_toast(toasts, msg);
                     },
                 }
-
-                // Lista download CONDIVISA: visibile sotto entrambe le tab
-                div { class: "flex flex-col gap-2",
-                    div { class: "flex items-center gap-2",
-                        h2 { class: "text-lg font-semibold", "Download" }
-                        span { class: "badge badge-neutral", "{downloads.read().len()}" }
-                    }
-                    div { class: "flex flex-col gap-3 max-h-[300px] overflow-y-auto pr-1",
-                        crate::ui::download_list::DownloadList {
-                            downloads,
-                            controls,
-                            on_open_failed: move |msg: String| {
-                                push_toast(toasts, msg);
-                            },
-                        }
-                    }
-                }
             }
 
-            if !*auto_tab.read() && *dialog_open.read() {
+            if *dialog_open.read() {
                 crate::ui::new_download_dialog::NewDownloadDialog {
                     open: dialog_open,
                     referers: referer_store.read().list().to_vec(),

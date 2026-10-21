@@ -2,16 +2,19 @@ use crate::download::types::{DownloadControl, DownloadId, DownloadItem, Download
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
+/// Pane unico dei download: alto ~2/3 della pagina, scrollabile, a RIGHE
+/// (non card). Badge stato, percentuale e bottoni sempre visibili; il nome
+/// file va in ellipsis se troppo lungo (tooltip col path completo).
 #[component]
 pub fn DownloadList(
-    mut downloads: Signal<Vec<DownloadItem>>,
+    downloads: Signal<Vec<DownloadItem>>,
     controls: Signal<HashMap<DownloadId, DownloadControl>>,
     on_open_failed: EventHandler<String>,
 ) -> Element {
     rsx! {
-        div { class: "flex flex-col gap-3",
+        div { class: "h-[65vh] rounded-box border border-base-300 bg-base-200/40 p-3 flex flex-col gap-2 overflow-y-auto",
             for item in downloads.read().iter() {
-                DownloadCard {
+                DownloadRow {
                     key: "{item.id}",
                     item: item.clone(),
                     controls,
@@ -19,8 +22,8 @@ pub fn DownloadList(
                 }
             }
             if downloads.read().is_empty() {
-                div { class: "rounded-box border border-dashed border-base-300 py-6 text-center text-sm opacity-60",
-                    "Nessun download. Usa una delle tab sopra per avviarne uno."
+                div { class: "m-auto rounded-box border border-dashed border-base-300 px-6 py-4 text-center text-sm opacity-60",
+                    "Nessun download. Usa il pulsante \"＋ Manuale\" per avviarne uno."
                 }
             }
         }
@@ -28,7 +31,7 @@ pub fn DownloadList(
 }
 
 #[component]
-fn DownloadCard(
+fn DownloadRow(
     item: DownloadItem,
     controls: Signal<HashMap<DownloadId, DownloadControl>>,
     on_open_failed: EventHandler<String>,
@@ -39,21 +42,8 @@ fn DownloadCard(
     );
     let indeterminate = item.total == 0 && item.state == DownloadState::Downloading;
 
-    let progress_el = if indeterminate {
-        rsx! { progress { class: "progress progress-primary w-full" } }
-    } else {
-        rsx! {
-            progress {
-                class: "progress progress-primary w-full",
-                value: "{item.current}",
-                max: "{item.total.max(1)}",
-            }
-        }
-    };
-
-    // Doppio-click: apre il file con l'app di sistema. L'handler è collegato a tutte
-    // le card ma è no-op per gli stati non Completed (Dioxus 0.7 non supporta handler
-    // opzionali sugli elementi); solo le card Completed non hanno bottoni in conflitto.
+    // Doppio-click sulla riga: apre il file (solo Completed; l'handler è
+    // collegato a tutte le righe, no-op altrimenti — vedi KB Dioxus 0.7)
     let can_open = item.state == DownloadState::Completed;
     let open_path = item.filename.clone();
     let open_file = move |_| {
@@ -72,69 +62,96 @@ fn DownloadCard(
         });
     };
 
+    let full_path = item.filename.display().to_string();
+    let name = item
+        .filename
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let badge = match &item.state {
+        DownloadState::Completed => rsx! {
+            span { class: "badge badge-success shrink-0", "Completato" }
+        },
+        DownloadState::Failed(reason) => rsx! {
+            span {
+                class: "badge badge-error shrink-0",
+                title: "{reason}",
+                "Errore"
+            }
+        },
+        DownloadState::Cancelled => rsx! {
+            span { class: "badge badge-warning shrink-0", "Annullato" }
+        },
+        DownloadState::Paused => rsx! {
+            span { class: "badge badge-ghost shrink-0", "In pausa" }
+        },
+        DownloadState::Downloading => rsx! {
+            span { class: "badge badge-primary shrink-0", "Download" }
+        },
+    };
+
     rsx! {
         div {
-            class: "card bg-base-200 shadow",
+            class: "flex items-center gap-3 rounded-lg bg-base-100 px-3 py-2",
             ondoubleclick: open_file,
-            div { class: "card-body gap-2 p-4",
-                div { class: "flex items-center justify-between gap-2",
-                    span { class: "font-medium truncate", title: "{item.filename.display()}",
-                        "{item.filename.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()}"
-                    }
-                    match &item.state {
-                        DownloadState::Completed => rsx! { span { class: "badge badge-success", "Completato" } },
-                        DownloadState::Failed(_) => rsx! { span { class: "badge badge-error", "Errore" } },
-                        DownloadState::Cancelled => rsx! { span { class: "badge badge-warning", "Annullato" } },
-                        DownloadState::Paused => rsx! { span { class: "badge badge-ghost", "In pausa" } },
-                        DownloadState::Downloading => rsx! { span { class: "badge badge-primary", "Download" } },
+            {badge}
+            // Nome file: ellipsis se lungo, tooltip col path completo
+            span {
+                class: "truncate min-w-0 flex-1 text-sm font-medium",
+                title: "{full_path}",
+                "{name}"
+            }
+            // Barra mini: sempre presente, larghezza fissa
+            if indeterminate {
+                progress { class: "progress progress-primary w-28 shrink-0" }
+            } else {
+                progress {
+                    class: "progress progress-primary w-28 shrink-0",
+                    value: "{item.current}",
+                    max: "{item.total.max(1)}",
+                }
+            }
+            // Percentuale/dimensioni: SEMPRE visibili
+            span { class: "text-xs tabular-nums opacity-70 shrink-0 w-36 text-right",
+                if item.total > 0 {
+                    "{item.percentage()}% — {item.current}/{item.total} B"
+                } else {
+                    "{item.current} B"
+                }
+            }
+            div { class: "flex gap-1 shrink-0",
+                if item.state == DownloadState::Downloading {
+                    button {
+                        class: "btn btn-xs",
+                        onclick: move |_| {
+                            if let Some(ctl) = controls.read().get(&item.id) {
+                                let _ = ctl.pause.send(true);
+                            }
+                        },
+                        "Pausa"
                     }
                 }
-                {progress_el}
-                if let DownloadState::Failed(reason) = &item.state {
-                    div { class: "alert alert-error py-2 text-sm", "{reason}" }
-                }
-                div { class: "flex items-center justify-between text-sm opacity-70",
-                    span {
-                        if item.total > 0 {
-                            "{item.current}/{item.total} byte — {item.percentage()}%"
-                        } else {
-                            "{item.current} byte"
-                        }
+                if item.state == DownloadState::Paused {
+                    button {
+                        class: "btn btn-xs btn-primary",
+                        onclick: move |_| {
+                            if let Some(ctl) = controls.read().get(&item.id) {
+                                let _ = ctl.pause.send(false);
+                            }
+                        },
+                        "Riprendi"
                     }
-                    div { class: "flex gap-2",
-                        if item.state == DownloadState::Downloading {
-                            button {
-                                class: "btn btn-xs",
-                                onclick: move |_| {
-                                    if let Some(ctl) = controls.read().get(&item.id) {
-                                        let _ = ctl.pause.send(true);
-                                    }
-                                },
-                                "Pausa"
+                }
+                if !is_terminal {
+                    button {
+                        class: "btn btn-xs btn-error",
+                        onclick: move |_| {
+                            if let Some(ctl) = controls.read().get(&item.id) {
+                                ctl.cancel.cancel();
                             }
-                        }
-                        if item.state == DownloadState::Paused {
-                            button {
-                                class: "btn btn-xs btn-primary",
-                                onclick: move |_| {
-                                    if let Some(ctl) = controls.read().get(&item.id) {
-                                        let _ = ctl.pause.send(false);
-                                    }
-                                },
-                                "Riprendi"
-                            }
-                        }
-                        if !is_terminal {
-                            button {
-                                class: "btn btn-xs btn-error",
-                                onclick: move |_| {
-                                    if let Some(ctl) = controls.read().get(&item.id) {
-                                        ctl.cancel.cancel();
-                                    }
-                                },
-                                "Annulla"
-                            }
-                        }
+                        },
+                        "Annulla"
                     }
                 }
             }
