@@ -65,35 +65,36 @@ const TITLE_JS: &str = r#"
 })()
 "#;
 
-/// Scout DOM (versione Promise): il play forzato NON basta (autoplay spesso
-/// negato senza user activation, preload assente → zero fetch → zero eventi
-/// CDP). Raccoglie per 12 tick × 1s gli URL media dal DOM live — video
-/// src/currentSrc + <source> + link con estensione video — tenta il play
-/// muted e risolve con la lista JSON. ExecuteScript attende la Promise: il
-/// risultato arriva nel completed handler (niente postMessage).
-const DOM_SCOUT_JS: &str = r#"
-new Promise(res => {
-    const seen = {};
+/// Scout DOM — TICK istantaneo guidato da Rust: il pump loop lo lancia ogni 1s
+/// dopo ogni navigazione (per 20s). Stato in window.__lwSeen (persiste nella
+/// pagina): ogni tick ritorna SOLO i nuovi URL trovati. Il play muted avviene
+/// una volta per video. Niente Promise né postMessage: ExecuteScript ritorna
+/// subito e il risultato arriva al completed handler.
+const SCOUT_TICK_JS: &str = r#"
+(function() {
+    if (!window.__lwSeen) { window.__lwSeen = {}; window.__lwPlayed = {}; }
     const out = [];
-    let n = 0;
-    const t = setInterval(() => {
-        n += 1;
-        document.querySelectorAll('video, video source').forEach(el => {
-            const u = el.currentSrc || el.src || el.getAttribute('src') || '';
-            if (u && !seen[u]) { seen[u] = 1; out.push({ url: u, from_video: true }); }
-        });
-        document.querySelectorAll('a[href]').forEach(a => {
-            const h = a.getAttribute('href') || '';
-            if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !seen[h]) {
-                seen[h] = 1; out.push({ url: h, from_video: false });
-            }
-        });
-        document.querySelectorAll('video').forEach(v => {
-            if (v.paused) { v.muted = true; const p = v.play(); if (p && p.catch) p.catch(() => {}); }
-        });
-        if (n >= 12) { clearInterval(t); res(JSON.stringify(out)); }
-    }, 1000);
-})
+    document.querySelectorAll('video, video source').forEach(el => {
+        const u = el.currentSrc || el.src || el.getAttribute('src') || '';
+        if (u && !window.__lwSeen[u]) { window.__lwSeen[u] = 1; out.push({ url: u, from_video: true }); }
+    });
+    document.querySelectorAll('a[href]').forEach(a => {
+        const h = a.getAttribute('href') || '';
+        if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !window.__lwSeen[h]) {
+            window.__lwSeen[h] = 1; out.push({ url: h, from_video: false });
+        }
+    });
+    document.querySelectorAll('video').forEach(v => {
+        const key = v.currentSrc || v.src || '';
+        if (v.paused && !window.__lwPlayed[key]) {
+            window.__lwPlayed[key] = 1;
+            v.muted = true;
+            const p = v.play();
+            if (p && p.catch) p.catch(() => {});
+        }
+    });
+    return JSON.stringify(out);
+})()
 "#;
 
 /// Avvia il thread browser. `events` riceve candidati/URL/titolo/errori; il caller
@@ -266,71 +267,39 @@ fn browser_thread(
         &mut 0,
     );
 
-    // Titolo + scout DOM dopo ogni navigazione completata (§5)
+    // Titolo dopo ogni navigazione completata + attivazione scout (§5)
     let title_events = events.clone();
-    let scout_events = events.clone();
-    let scout_candidates = candidates.clone();
     let scout_webview = webview.clone();
+    let scout_deadline = std::rc::Rc::new(std::cell::Cell::new(
+        Option::<std::time::Instant>::None,
+    ));
+    let scout_last = std::rc::Rc::new(std::cell::Cell::new(
+        Option::<std::time::Instant>::None,
+    ));
+    let scout_tick_events = events.clone();
+    let scout_tick_candidates = candidates.clone();
     let _ = webview.add_NavigationCompleted(
-        &NavigationCompletedEventHandler::create(Box::new(move |_webview, _args| {
-            eprintln!("[browser] navigazione completata: estraggo titolo + scout DOM");
+        &NavigationCompletedEventHandler::create(Box::new({
+            let scout_deadline = scout_deadline.clone();
+            move |_webview, _args| {
+            eprintln!("[browser] navigazione completata: estraggo titolo + attivo scout (20s)");
             let title_events = title_events.clone();
-            scout_webview
-                .ExecuteScript(
-                    &HSTRING::from(TITLE_JS),
-                    &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
-                        error_code?;
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
-                            && let Some(title) = v.as_str()
-                        {
-                            eprintln!("[browser] titolo: {title}");
-                            let _ = title_events.send(BrowserEvent::Title(title.to_string()));
-                        }
-                        Ok(())
-                    })),
-                )
-                .ok();
-            // Scout: ExecuteScript ATTENDE la Promise (~12s) → il risultato
-            // (lista JSON) arriva qui, niente canali intermedi
-            let scout_events = scout_events.clone();
-            let scout_candidates = scout_candidates.clone();
             let _ = scout_webview.ExecuteScript(
-                &HSTRING::from(DOM_SCOUT_JS),
+                &HSTRING::from(TITLE_JS),
                 &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
-                    match &error_code {
-                        Ok(()) => {}
-                        Err(e) => {
-                            eprintln!("[browser] ERRORE scout DOM: {e}");
-                            return Ok(());
-                        }
-                    }
-                    let Ok(payload) = serde_json::from_str::<String>(&json) else {
-                        return Ok(());
-                    };
-                    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&payload)
-                    else {
-                        eprintln!("[browser] scout: payload non riconosciuto");
-                        return Ok(());
-                    };
-                    for item in items {
-                        if let Some(url) = item["url"].as_str() {
-                            let from_video = item["from_video"].as_bool().unwrap_or(false);
-                            eprintln!("[browser] DOM scout: {url}");
-                            if let Some(candidate) = classify_dom(url, from_video)
-                                && scout_candidates.borrow_mut().insert(&candidate)
-                            {
-                                eprintln!(
-                                    "[browser] candidato: {} (stream={})",
-                                    candidate.url, candidate.is_stream
-                                );
-                                let _ = scout_events.send(BrowserEvent::Candidate(candidate));
-                            }
-                        }
+                    error_code?;
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
+                        && let Some(title) = v.as_str()
+                    {
+                        eprintln!("[browser] titolo: {title}");
+                        let _ = title_events.send(BrowserEvent::Title(title.to_string()));
                     }
                     Ok(())
                 })),
             );
+            scout_deadline.set(Some(std::time::Instant::now() + std::time::Duration::from_secs(20)));
             Ok(())
+            }
         })),
         &mut 0,
     );
@@ -417,6 +386,54 @@ fn browser_thread(
         while let Ok(cmd) = rx.try_recv() {
             eprintln!("[browser] comando: {cmd:?}");
             exec(&controller, &webview, cmd);
+        }
+        // Scout DOM a tick (spec §5): ogni 1s fino a 20s dal load, ExecuteScript
+        // ISTANTANEO che ritorna i nuovi URL trovati nel DOM live
+        if let Some(deadline) = scout_deadline.get() {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                scout_deadline.set(None);
+                eprintln!("[browser] scout: finestra 20s terminata");
+            } else if scout_last
+                .get()
+                .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+            {
+                scout_last.set(Some(now));
+                let scout_events = scout_tick_events.clone();
+                let scout_candidates = scout_tick_candidates.clone();
+                let _ = webview.ExecuteScript(
+                    &HSTRING::from(SCOUT_TICK_JS),
+                    &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
+                        if let Err(e) = error_code {
+                            eprintln!("[browser] ERRORE scout tick: {e}");
+                            return Ok(());
+                        }
+                        let Ok(payload) = serde_json::from_str::<String>(&json) else {
+                            return Ok(());
+                        };
+                        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&payload)
+                        else {
+                            return Ok(());
+                        };
+                        for item in items {
+                            if let Some(url) = item["url"].as_str() {
+                                let from_video = item["from_video"].as_bool().unwrap_or(false);
+                                eprintln!("[browser] DOM scout: {url}");
+                                if let Some(candidate) = classify_dom(url, from_video)
+                                    && scout_candidates.borrow_mut().insert(&candidate)
+                                {
+                                    eprintln!(
+                                        "[browser] candidato: {} (stream={})",
+                                        candidate.url, candidate.is_stream
+                                    );
+                                    let _ = scout_events.send(BrowserEvent::Candidate(candidate));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })),
+                );
+            }
         }
         let mut msg = MSG::default();
         if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
