@@ -9,9 +9,12 @@ use tokio::sync::mpsc;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// CSS embeddato nel binario (include_str, pattern PWDManager): distribuzione a file singolo.
+/// Le modifiche al CSS richiedono ricompilazione (in dev dx serve la gestisce da sé).
+const TAILWIND_CSS: &str = include_str!("../../assets/tailwind.css");
+
 #[component]
 pub fn App() -> Element {
-    const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
     let mut downloads = use_signal(Vec::<DownloadItem>::new);
     let mut controls = use_signal(HashMap::<DownloadId, DownloadControl>::new);
@@ -74,7 +77,7 @@ pub fn App() -> Element {
     };
 
     rsx! {
-        head { link { rel: "stylesheet", href: TAILWIND_CSS } }
+        head { style { "{TAILWIND_CSS}" } }
         div { class: "min-h-screen bg-base-100 p-6",
             div { class: "max-w-2xl mx-auto flex flex-col gap-4",
                 header { class: "flex items-center justify-between",
