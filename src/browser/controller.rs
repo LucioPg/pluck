@@ -1,0 +1,355 @@
+//! Thread browser: crea WebView2 su un thread dedicato (pump di messaggi proprio)
+//! e inoltra gli eventi all'UI via canale tokio.
+//!
+//! Regole architetturali (spec §4):
+//! - TUTTE le chiamate COM avvengono su questo thread — l'UI non tocca mai COM
+//! - L'init usa `wait_for_async_operation` (nested pump): sicuro perché qui non
+//!   c'è nessun loop UI in esecuzione (il reentrancy problem è solo sul main)
+//! - I comandi arrivano da un canale std mpsc, consumato a ogni giro di pump
+
+use super::sniff::{CandidateSet, candidate_from_response_received};
+use super::{BrowserCommand, BrowserEvent, BrowserHandle};
+use std::path::PathBuf;
+use tokio::sync::mpsc::UnboundedSender;
+use webview2_com::{
+    CallDevToolsProtocolMethodCompletedHandler, CoreWebView2EnvironmentOptions,
+    CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
+    DevToolsProtocolEventReceivedEventHandler, DownloadStartingEventHandler,
+    ExecuteScriptCompletedHandler, Microsoft::Web::WebView2::Win32::*,
+    NavigationCompletedEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, SourceChangedEventHandler, take_pwstr,
+};
+use windows::{
+    core::{HSTRING, Interface, PCWSTR, PWSTR},
+    Win32::{
+        Foundation::{HWND, RECT},
+        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, GetClientRect, MSG, MsgWaitForMultipleObjectsEx, PeekMessageW,
+            PM_REMOVE, QS_ALLINPUT, MWMO_INPUTAVAILABLE, TranslateMessage,
+        },
+    },
+};
+
+/// Estrazione titolo: chain best-effort (spec §5). ExecuteScript ritorna la
+/// stringa JSON-encoded (virgolette incluse): il handler la decodifica.
+const TITLE_JS: &str = r#"
+(function() {
+    function clean(t) {
+        t = (t || '').trim();
+        let i = t.lastIndexOf('|');
+        if (i > 0) t = t.slice(0, i).trim();
+        i = t.lastIndexOf(' - ');
+        if (i > 0) t = t.slice(0, i).trim();
+        i = t.lastIndexOf('–');
+        if (i > 0) t = t.slice(0, i).trim();
+        return t;
+    }
+    const og = document.querySelector('meta[property="og:title"]');
+    if (og && og.content && og.content.trim()) return og.content.trim();
+    const tw = document.querySelector('meta[name="twitter:title"]');
+    if (tw && tw.content && tw.content.trim()) return tw.content.trim();
+    const h1 = document.querySelector('h1');
+    if (h1 && h1.textContent.trim()) return h1.textContent.trim();
+    const v = document.querySelector('video');
+    if (v) {
+        let el = v.previousElementSibling;
+        while (el) {
+            if (/^(P|H[1-6])$/.test(el.tagName) && el.textContent.trim()) {
+                return el.textContent.trim();
+            }
+            el = el.previousElementSibling;
+        }
+    }
+    return clean(document.title);
+})()
+"#;
+
+/// Autoplay muted con retry: il browser è invisibile (scelta utente: background
+/// puro) quindi nessuno cliccherà mai "play" — senza questo, molti player non
+/// avviano il fetch dei media e lo sniffing non vede nulla. 6 retry × 1s coprono
+/// i player che costruiscono il <video> dopo il boot JS.
+const PLAY_JS: &str = r#"
+(function() {
+    let n = 0;
+    const t = setInterval(() => {
+        n += 1;
+        document.querySelectorAll('video').forEach(v => {
+            if (v.paused) {
+                v.muted = true;
+                const p = v.play();
+                if (p && p.catch) p.catch(() => {});
+            }
+        });
+        if (n >= 6) clearInterval(t);
+    }, 1000);
+})()
+"#;
+
+/// Avvia il thread browser. `events` riceve candidati/URL/titolo/errori; il caller
+/// deve consumarlo (tipicamente un task dentro il componente Dioxus).
+pub fn spawn_browser(
+    parent_hwnd: isize,
+    user_data_dir: PathBuf,
+    events: UnboundedSender<BrowserEvent>,
+) -> BrowserHandle {
+    let (tx, rx) = std::sync::mpsc::channel::<BrowserCommand>();
+    std::thread::Builder::new()
+        .name("webview2-browser".into())
+        .spawn(move || {
+            browser_thread(parent_hwnd, user_data_dir, events, rx);
+        })
+        .expect("spawn browser thread");
+    BrowserHandle { tx }
+}
+
+fn browser_thread(
+    parent_hwnd: isize,
+    user_data_dir: PathBuf,
+    events: UnboundedSender<BrowserEvent>,
+    rx: std::sync::mpsc::Receiver<BrowserCommand>,
+) {
+    // Tutto il corpo è COM: un solo blocco unsafe (edition 2024: le unsafe fn
+    // non permettono più op unsafe implicite nel body)
+    unsafe {
+    // S_FALSE (già inizializzata) arriva come Ok: solo gli errori veri bloccano
+    if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
+        let _ = events.send(BrowserEvent::Error("CoInitializeEx: COM non disponibile".into()));
+        return;
+    }
+
+    let options = CoreWebView2EnvironmentOptions::default();
+
+    let environment = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Err(e) = CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
+            Box::new(move |handler| {
+                CreateCoreWebView2EnvironmentWithOptions(
+                    PCWSTR::null(),
+                    &HSTRING::from(user_data_dir.as_os_str()),
+                    &ICoreWebView2EnvironmentOptions::from(options),
+                    &handler,
+                )
+                .map_err(webview2_com::Error::WindowsError)
+            }),
+            Box::new(move |error_code, environment| {
+                error_code?;
+                tx.send(environment)
+                    .expect("send environment over mpsc channel");
+                Ok(())
+            }),
+        ) {
+            let _ = events.send(BrowserEvent::Error(format!("Runtime WebView2: {e}")));
+            return;
+        }
+        match rx.recv() {
+            Ok(Some(env)) => env,
+            _ => {
+                let _ = events.send(BrowserEvent::Error("WebView2: environment nullo".into()));
+                return;
+            }
+        }
+    };
+
+    let controller = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Err(e) = CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
+            Box::new(move |handler| {
+                environment
+                    .CreateCoreWebView2Controller(HWND(parent_hwnd as _), &handler)
+                    .map_err(webview2_com::Error::WindowsError)
+            }),
+            Box::new(move |error_code, controller| {
+                error_code?;
+                tx.send(controller).expect("send controller over mpsc channel");
+                Ok(())
+            }),
+        ) {
+            let _ = events.send(BrowserEvent::Error(format!("Controller WebView2: {e}")));
+            return;
+        }
+        match rx.recv() {
+            Ok(Some(ctl)) => ctl,
+            _ => {
+                let _ = events.send(BrowserEvent::Error("WebView2: controller nullo".into()));
+                return;
+            }
+        }
+    };
+
+    // Nascosto per sempre (browser in background), ma con bounds = client rect
+    // del padre: alcuni siti saltano il caricamento dei media su viewport 0×0.
+    let _ = controller.SetIsVisible(false);
+    let mut client = RECT::default();
+    let _ = GetClientRect(HWND(parent_hwnd as _), &mut client);
+    let _ = controller.SetBounds(client);
+
+    let Ok(webview) = controller.CoreWebView2() else {
+        let _ = events.send(BrowserEvent::Error("WebView2: CoreWebView2 assente".into()));
+        return;
+    };
+
+    // Politiche di sicurezza (spec §2): niente popup, permessi negati, download
+    // nativi annullati (il download passa da noi), NESSUN host object esposto.
+    let _ = webview.add_NewWindowRequested(
+        &NewWindowRequestedEventHandler::create(Box::new(|_webview, args| {
+            if let Some(args) = args {
+                let _ = args.SetHandled(true);
+            }
+            Ok(())
+        })),
+        &mut 0,
+    );
+    let _ = webview.add_PermissionRequested(
+        &PermissionRequestedEventHandler::create(Box::new(|_webview, args| {
+            if let Some(args) = args {
+                let _ = args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY);
+            }
+            Ok(())
+        })),
+        &mut 0,
+    );
+    // DownloadStarting è su ICoreWebView2_4: cast necessario
+    if let Ok(webview4) = webview.cast::<ICoreWebView2_4>() {
+        let _ = webview4.add_DownloadStarting(
+            &DownloadStartingEventHandler::create(Box::new(|_webview, args| {
+                if let Some(args) = args {
+                    let _ = args.SetHandled(true);
+                }
+                Ok(())
+            })),
+            &mut 0,
+        );
+    }
+
+    // URL pagina corrente (referer per i download)
+    let url_events = events.clone();
+    let _ = webview.add_SourceChanged(
+        &SourceChangedEventHandler::create(Box::new(move |webview, _args| {
+            if let Some(webview) = webview {
+                let mut uri = PWSTR::null();
+                if webview.Source(&mut uri).is_ok() {
+                    let _ = url_events.send(BrowserEvent::PageUrl(take_pwstr(uri)));
+                }
+            }
+            Ok(())
+        })),
+        &mut 0,
+    );
+
+    // Titolo + autoplay muted dopo ogni navigazione completata (§5)
+    let title_events = events.clone();
+    let _ = webview.add_NavigationCompleted(
+        &NavigationCompletedEventHandler::create(Box::new({
+            let title_webview = webview.clone();
+            move |_webview, _args| {
+                let title_events = title_events.clone();
+                title_webview.ExecuteScript(
+                    &HSTRING::from(TITLE_JS),
+                    &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
+                        error_code?;
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
+                            && let Some(title) = v.as_str()
+                        {
+                            let _ = title_events.send(BrowserEvent::Title(title.to_string()));
+                        }
+                        Ok(())
+                    })),
+                )?;
+                let _ = title_webview.ExecuteScript(
+                    &HSTRING::from(PLAY_JS),
+                    &ExecuteScriptCompletedHandler::create(Box::new(|error_code, _json| {
+                        error_code
+                    })),
+                );
+                Ok(())
+            }
+        })),
+        &mut 0,
+    );
+
+    // Sniffing CDP: Network.enable + eventi responseReceived (spec §5)
+    let _ = webview.CallDevToolsProtocolMethod(
+        &HSTRING::from("Network.enable"),
+        &HSTRING::from("{}"),
+        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|error_code, _json| {
+            error_code
+        })),
+    );
+    if let Ok(receiver) =
+        webview.GetDevToolsProtocolEventReceiver(&HSTRING::from("Network.responseReceived"))
+    {
+        let cdp_events = events.clone();
+        let mut candidates = CandidateSet::new(500);
+        let _ = receiver.add_DevToolsProtocolEventReceived(
+            &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
+                move |_webview, args| {
+                    if let Some(args) = args {
+                        let mut json = PWSTR::null();
+                        if args.ParameterObjectAsJson(&mut json).is_ok() {
+                            let json = take_pwstr(json);
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
+                                && let Some(candidate) =
+                                    candidate_from_response_received(&value)
+                                && candidates.insert(&candidate)
+                            {
+                                let _ = cdp_events.send(BrowserEvent::Candidate(candidate));
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            )),
+            &mut 0,
+        );
+    }
+
+    let _ = webview.Navigate(&HSTRING::from("about:blank"));
+
+    // Loop comandi + pump messaggi COM (spec §4). I comandi arrivano solo dal
+    // canale; i messaggi Windows servono alle async op interne di WebView2.
+    loop {
+        while let Ok(cmd) = rx.try_recv() {
+            exec(&controller, &webview, cmd);
+        }
+        let mut msg = MSG::default();
+        if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        } else {
+            let _ = MsgWaitForMultipleObjectsEx(None, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+    }
+    }
+}
+
+fn exec(
+    controller: &ICoreWebView2Controller,
+    webview: &ICoreWebView2,
+    cmd: BrowserCommand,
+) {
+    unsafe {
+        match cmd {
+            BrowserCommand::Navigate(url) => {
+                let _ = webview.Navigate(&HSTRING::from(url));
+            }
+            BrowserCommand::Back => {
+                let _ = webview.GoBack();
+            }
+            BrowserCommand::Reload => {
+                let _ = webview.Reload();
+            }
+            BrowserCommand::SetVisible(visible) => {
+                let _ = controller.SetIsVisible(visible);
+            }
+            BrowserCommand::SetBounds(left, top, right, bottom) => {
+                let _ = controller.SetBounds(RECT {
+                    left: left as i32,
+                    top: top as i32,
+                    right: right as i32,
+                    bottom: bottom as i32,
+                });
+            }
+        }
+    }
+}

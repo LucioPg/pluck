@@ -13,13 +13,57 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Le modifiche al CSS richiedono ricompilazione (in dev dx serve la gestisce da sé).
 const TAILWIND_CSS: &str = include_str!("../../assets/tailwind.css");
 
+fn push_toast(mut toasts: Signal<Vec<String>>, msg: String) {
+    toasts.write().push(msg.clone());
+    spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        toasts.write().retain(|t| t != &msg);
+    });
+}
+
+/// Avvia il download e registra il referer nei preferiti (dedup + persist).
+/// Funzione pura su parametri Copy: chiamabile da entrambe le tab senza
+/// contorsioni di closure (il motore resta in `download/engine.rs`).
+fn launch_download(
+    tx: mpsc::Sender<ProgressMessage>,
+    mut downloads: Signal<Vec<DownloadItem>>,
+    mut controls: Signal<HashMap<DownloadId, DownloadControl>>,
+    mut referer_store: Signal<RefererStore>,
+    url: String,
+    referer: Option<String>,
+    dest: PathBuf,
+) {
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
+    // non è ancora in lista il receiver li scarterebbe (card bloccata su "Download").
+    downloads.write().push(DownloadItem {
+        id,
+        url: url.clone(),
+        referer: referer.clone(),
+        filename: dest.clone(),
+        state: DownloadState::Downloading,
+        current: 0,
+        total: 0,
+    });
+    let ctl = spawn_download(id, url, referer.clone(), dest, tx);
+    // Referer preferiti: dedup + move-to-front, poi persistenza JSON.
+    // Un errore di salvataggio NON blocca il download (lista resta in memoria).
+    if let Some(r) = &referer {
+        referer_store.write().record(r);
+        let _ = referer_store.read().save();
+    }
+    controls.write().insert(id, ctl);
+}
+
 #[component]
 pub fn App() -> Element {
 
     let mut downloads = use_signal(Vec::<DownloadItem>::new);
     let mut controls = use_signal(HashMap::<DownloadId, DownloadControl>::new);
     let mut dialog_open = use_signal(|| false);
-    let mut toasts = use_signal(Vec::<String>::new);
+    let toasts = use_signal(Vec::<String>::new);
+    // Tab attiva: false = Manuale (default), true = Automatica
+    let mut auto_tab = use_signal(|| false);
     // Referer preferiti: caricati una sola volta all'avvio da %APPDATA%/ldwhelper/referers.json
     let mut referer_store = use_signal(|| RefererStore::load(RefererStore::default_path()));
 
@@ -53,68 +97,86 @@ pub fn App() -> Element {
         tx
     });
 
-    let mut start_download = move |url: String, referer: Option<String>, dest: PathBuf| {
-        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-        // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
-        // non è ancora in lista il receiver li scarterebbe (card bloccata su "Download").
-        downloads.write().push(DownloadItem {
-            id,
-            url: url.clone(),
-            referer: referer.clone(),
-            filename: dest.clone(),
-            state: DownloadState::Downloading,
-            current: 0,
-            total: 0,
-        });
-        let ctl = spawn_download(id, url, referer.clone(), dest, tx.clone());
-        // Referer preferiti: dedup + move-to-front, poi persistenza JSON.
-        // Un errore di salvataggio NON blocca il download (lista resta in memoria).
-        if let Some(r) = &referer {
-            referer_store.write().record(r);
-            let _ = referer_store.read().save();
-        }
-        controls.write().insert(id, ctl);
-    };
+    // Chiusure di submit: cloni tx per consumer (le props vogliono FnMut)
+    let tx_auto = tx.clone();
+    let auto_on_download =
+        move |(url, referer, dest): (String, Option<String>, PathBuf)| {
+            launch_download(
+                tx_auto.clone(),
+                downloads,
+                controls,
+                referer_store,
+                url,
+                referer,
+                dest,
+            );
+        };
+    let tx_manual = tx.clone();
+    let manual_on_submit =
+        move |(url, referer, dest): (String, Option<String>, PathBuf)| {
+            launch_download(
+                tx_manual.clone(),
+                downloads,
+                controls,
+                referer_store,
+                url,
+                referer,
+                dest,
+            );
+            dialog_open.set(false);
+        };
 
     rsx! {
         head { style { "{TAILWIND_CSS}" } }
         div { class: "min-h-screen bg-base-100 p-6",
             div { class: "max-w-2xl mx-auto flex flex-col gap-4",
-                header { class: "flex items-center justify-between",
-                    h1 { class: "text-2xl font-bold", "ldwhelper" }
-                    button {
-                        class: "btn btn-primary",
-                        onclick: move |_| dialog_open.set(true),
-                        "Nuovo download"
+                header { class: "flex items-center justify-between gap-4",
+                    h1 { class: "text-2xl font-bold shrink-0", "ldwhelper" }
+                    div { class: "tabs tabs-boxed",
+                        button {
+                            class: if !*auto_tab.read() { "tab tab-active" } else { "tab" },
+                            onclick: move |_| auto_tab.set(false),
+                            "Manuale"
+                        }
+                        button {
+                            class: if *auto_tab.read() { "tab tab-active" } else { "tab" },
+                            onclick: move |_| auto_tab.set(true),
+                            "Automatica"
+                        }
+                    }
+                    if !*auto_tab.read() {
+                        button {
+                            class: "btn btn-primary shrink-0",
+                            onclick: move |_| dialog_open.set(true),
+                            "Nuovo download"
+                        }
                     }
                 }
+
+                crate::ui::auto_page::AutoPage {
+                    active: auto_tab,
+                    on_download: auto_on_download,
+                    on_error: move |msg: String| {
+                        push_toast(toasts, msg);
+                    },
+                }
+
                 crate::ui::download_list::DownloadList {
                     downloads,
                     controls,
                     on_open_failed: move |msg: String| {
-                        toasts.write().push(msg.clone());
-                        spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                            toasts.write().retain(|t| t != &msg);
-                        });
+                        push_toast(toasts, msg);
                     },
                 }
             }
 
-            if *dialog_open.read() {
+            if !*auto_tab.read() && *dialog_open.read() {
                 crate::ui::new_download_dialog::NewDownloadDialog {
                     open: dialog_open,
                     referers: referer_store.read().list().to_vec(),
-                    on_submit: move |(url, referer, dest)| {
-                        start_download(url, referer, dest);
-                        dialog_open.set(false);
-                    },
+                    on_submit: manual_on_submit,
                     on_error: move |msg: String| {
-                        toasts.write().push(msg.clone());
-                        spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                            toasts.write().retain(|t| t != &msg);
-                        });
+                        push_toast(toasts, msg);
                     },
                     on_save_referer: move |r: String| {
                         if r.is_empty() {

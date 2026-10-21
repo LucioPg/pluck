@@ -1,5 +1,6 @@
 //! ldwhelper — desktop download manager.
 
+mod browser;
 mod download;
 mod referers;
 mod ui;
