@@ -6,6 +6,7 @@ use std::collections::HashMap;
 pub fn DownloadList(
     mut downloads: Signal<Vec<DownloadItem>>,
     controls: Signal<HashMap<DownloadId, DownloadControl>>,
+    on_open_failed: EventHandler<String>,
 ) -> Element {
     rsx! {
         div { class: "flex flex-col gap-3",
@@ -14,6 +15,7 @@ pub fn DownloadList(
                     key: "{item.id}",
                     item: item.clone(),
                     controls,
+                    on_open_failed,
                 }
             }
             if downloads.read().is_empty() {
@@ -27,6 +29,7 @@ pub fn DownloadList(
 fn DownloadCard(
     item: DownloadItem,
     controls: Signal<HashMap<DownloadId, DownloadControl>>,
+    on_open_failed: EventHandler<String>,
 ) -> Element {
     let is_terminal = matches!(
         item.state,
@@ -46,8 +49,31 @@ fn DownloadCard(
         }
     };
 
+    // Doppio-click: apre il file con l'app di sistema. L'handler è collegato a tutte
+    // le card ma è no-op per gli stati non Completed (Dioxus 0.7 non supporta handler
+    // opzionali sugli elementi); solo le card Completed non hanno bottoni in conflitto.
+    let can_open = item.state == DownloadState::Completed;
+    let open_path = item.filename.clone();
+    let open_file = move |_| {
+        if !can_open {
+            return;
+        }
+        let path = open_path.clone();
+        spawn(async move {
+            if !path.exists() {
+                on_open_failed.call("File non trovato sul disco".into());
+                return;
+            }
+            if let Err(e) = open::that(&path) {
+                on_open_failed.call(format!("Apertura fallita: {e}"));
+            }
+        });
+    };
+
     rsx! {
-        div { class: "card bg-base-200",
+        div {
+            class: "card bg-base-200",
+            ondoubleclick: open_file,
             div { class: "card-body gap-2 p-4",
                 div { class: "flex items-center justify-between gap-2",
                     span { class: "font-medium truncate", title: "{item.filename.display()}",

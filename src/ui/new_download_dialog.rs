@@ -36,7 +36,10 @@ pub fn NewDownloadDialog(
         if *browsing.read() {
             return;
         }
-        let mut dialog = rfd::AsyncFileDialog::new();
+        // Primo filtro = preselezionato dal dialog; "Tutti i file" permette qualsiasi tipo.
+        let mut dialog = rfd::AsyncFileDialog::new()
+            .add_filter("MP4", &["mp4"])
+            .add_filter("Tutti i file", &["*"]);
         let suggested = filename.read().trim().to_string();
         if !suggested.is_empty() {
             dialog = dialog.set_file_name(&suggested);

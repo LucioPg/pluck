@@ -85,7 +85,17 @@ pub fn App() -> Element {
                         "Nuovo download"
                     }
                 }
-                crate::ui::download_list::DownloadList { downloads, controls }
+                crate::ui::download_list::DownloadList {
+                    downloads,
+                    controls,
+                    on_open_failed: move |msg: String| {
+                        toasts.write().push(msg.clone());
+                        spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                            toasts.write().retain(|t| t != &msg);
+                        });
+                    },
+                }
             }
 
             if *dialog_open.read() {
