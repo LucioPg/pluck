@@ -22,8 +22,9 @@ use webview2_com::{
 use windows::{
     core::{HSTRING, Interface, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{HWND, RECT},
+        Foundation::{CloseHandle, HWND, RECT},
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+        System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
         UI::WindowsAndMessaging::{
             DispatchMessageW, GetClientRect, MSG, MsgWaitForMultipleObjectsEx, PeekMessageW,
             PM_REMOVE, QS_ALLINPUT, MWMO_INPUTAVAILABLE, TranslateMessage,
@@ -275,6 +276,13 @@ fn browser_thread(
     };
     eprintln!("[browser] CoreWebView2 pronto");
 
+    // Pid del processo browser: serve allo shutdown (TerminateProcess veloce —
+    // il Close() graceful richiede secondi di teardown e tiene il lock sul
+    // profilo, bloccando la cancellazione privacy all'uscita)
+    let mut browser_pid: u32 = 0;
+    let _ = webview.BrowserProcessId(&mut browser_pid);
+    eprintln!("[browser] processo browser pid={browser_pid}");
+
     // Politiche di sicurezza (spec §2): niente popup, permessi negati, download
     // nativi annullati (il download passa da noi), NESSUN host object esposto.
     let _ = webview.add_NewWindowRequested(
@@ -446,11 +454,20 @@ fn browser_thread(
     // canale; i messaggi Windows servono alle async op interne di WebView2.
     loop {
         while let Ok(cmd) = rx.try_recv() {
-            // Shutdown gestito qui: Close() rilascia il lock sul profilo, poi il
-            // thread termina (il processo browser di WebView2 si ferma dopo)
+            // Shutdown gestito qui: termino il processo browser (veloce) così il
+            // lock sul profilo cade subito e l'UI può cancellarlo. Il Close()
+            // graceful richiede secondi: inutilizzabile per la privacy all'uscita.
             if let BrowserCommand::Shutdown(ack) = cmd {
-                eprintln!("[browser] shutdown: Close() controller + ack");
-                let _ = controller.Close();
+                eprintln!("[browser] shutdown: termino il browser (pid={browser_pid})");
+                if browser_pid != 0 {
+                    if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, browser_pid) {
+                        let _ = TerminateProcess(h, 1);
+                        let _ = CloseHandle(h);
+                    } else {
+                        eprintln!("[browser] OpenProcess fallito: procedo con Close()");
+                        let _ = controller.Close();
+                    }
+                }
                 let _ = ack.send(());
                 return;
             }
