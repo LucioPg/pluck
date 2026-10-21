@@ -31,6 +31,10 @@ use windows::{
     },
 };
 
+/// Log diagnostico esteso (raw CDP, tick scout vuoti): rumore per l'uso normale.
+/// true = debug sniffing; false = default.
+const VERBOSE_LOGS: bool = false;
+
 /// Estrazione titolo: chain best-effort (spec §5). ExecuteScript ritorna la
 /// stringa JSON-encoded (virgolette incluse): il handler la decodifica.
 const TITLE_JS: &str = r#"
@@ -356,10 +360,11 @@ fn browser_thread(
                         if args.ParameterObjectAsJson(&mut json).is_ok() {
                             let json = take_pwstr(json);
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                                if let Some(url) =
-                                    value["response"]["url"].as_str().map(|u| {
-                                        u.chars().take(140).collect::<String>()
-                                    })
+                                if VERBOSE_LOGS
+                                    && let Some(url) =
+                                        value["response"]["url"].as_str().map(|u| {
+                                            u.chars().take(140).collect::<String>()
+                                        })
                                 {
                                     eprintln!("[browser] CDP response: {url}");
                                 }
