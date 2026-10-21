@@ -209,39 +209,44 @@ fn candidate_row(
     // Due copie: una per il display (prendibile a prestito dal RSX), una per la
     // closure del click (consumata)
     let candidate_for_click = candidate.clone();
+    let size_label = match candidate.size {
+        Some(b) => browser::format_bytes(b),
+        None => "—".to_string(),
+    };
     rsx! {
         div {
             key: "{index}-{candidate.url}",
-            class: "card card-compact bg-base-200 shadow",
-            div { class: "card-body gap-1",
-                div { class: "flex items-center gap-2 min-w-0",
-                    span {
-                        class: if candidate.is_stream {
-                            "badge badge-warning badge-sm shrink-0"
-                        } else {
-                            "badge badge-success badge-sm shrink-0"
-                        },
-                        if candidate.is_stream { "m3u8/mpd" } else { "media" }
-                    }
-                    a {
-                        class: "link link-hover truncate text-xs text-base-content/70",
-                        href: "{candidate.url}",
-                        "{candidate.url}"
-                    }
-                }
-                if candidate.is_stream {
-                    button {
-                        class: "btn btn-sm btn-disabled",
-                        disabled: true,
-                        title: "Non scaricabile: aggiornamento futuro",
-                        "Non supportato — aggiornamento futuro"
-                    }
+            class: "flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1 text-xs shadow-sm",
+            span {
+                class: if candidate.is_stream {
+                    "badge badge-warning badge-sm shrink-0"
                 } else {
-                    button {
-                        class: "btn btn-sm btn-primary",
-                        onclick: move |_| start_download(candidate_for_click.clone()),
-                        "Scarica"
-                    }
+                    "badge badge-success badge-sm shrink-0"
+                },
+                if candidate.is_stream { "m3u8/mpd" } else { "media" }
+            }
+            // Nome leggibile (tooltip = URL completo)
+            span {
+                class: "truncate min-w-0 flex-1 font-medium",
+                title: "{candidate.url}",
+                "{candidate.name}"
+            }
+            // Dimensione se nota (probe HEAD/CDP), altrimenti trattino
+            span { class: "tabular-nums opacity-70 shrink-0 w-20 text-right",
+                title: "{candidate.url}",
+                "{size_label}"
+            }
+            if candidate.is_stream {
+                span {
+                    class: "badge badge-ghost badge-sm shrink-0",
+                    title: "Non scaricabile: aggiornamento futuro",
+                    "non supp."
+                }
+            } else {
+                button {
+                    class: "btn btn-xs btn-primary shrink-0",
+                    onclick: move |_| start_download(candidate_for_click.clone()),
+                    "Scarica"
                 }
             }
         }
@@ -336,8 +341,27 @@ fn init_browser(
                 browser::BrowserEvent::Candidate(c) => {
                     eprintln!("[auto] candidato ricevuto: {} (stream={})", c.url, c.is_stream);
                     let mut list = candidates.write();
-                    list.insert(0, c);
+                    list.insert(0, c.clone());
                     list.truncate(200);
+                    drop(list);
+                    // Dimensione mancante (candidato DOM) → probe HEAD async
+                    // con referer = pagina corrente; aggiorna la riga al termine
+                    if c.size.is_none() && !c.is_stream {
+                        let referer = page_url.read().trim().to_string();
+                        let mut candidates_updater = candidates;
+                        spawn(async move {
+                            if let Some(size) =
+                                browser::probe_size(&c.url, Some(referer.as_str()).filter(|r| !r.is_empty())).await
+                            {
+                                let mut list = candidates_updater.write();
+                                if let Some(item) =
+                                    list.iter_mut().find(|i| i.url == c.url)
+                                {
+                                    item.size = Some(size);
+                                }
+                            }
+                        });
+                    }
                 }
                 browser::BrowserEvent::PageUrl(url) => {
                     eprintln!("[auto] pagina corrente: {url}");

@@ -2735,6 +2735,7 @@ dependencies = [
  "futures-util",
  "image",
  "open",
+ "percent-encoding",
  "reqwest",
  "rfd 0.15.4",
  "serde",

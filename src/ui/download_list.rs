@@ -1,40 +1,7 @@
+use crate::browser::format_bytes;
 use crate::download::types::{DownloadControl, DownloadId, DownloadItem, DownloadState};
 use dioxus::prelude::*;
 use std::collections::HashMap;
-
-/// Formatta byte in unità leggibili (base 1024): `942 B`, `1.5 MB`, `2.0 GB`…
-fn format_bytes(v: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut val = v as f64;
-    let mut unit = 0usize;
-    while val >= 1024.0 && unit < UNITS.len() - 1 {
-        val /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{v} B")
-    } else {
-        format!("{val:.1} {}", UNITS[unit])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_bytes;
-
-    #[test]
-    fn format_bytes_units() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(942), "942 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(format_bytes(2 * 1024_u64.pow(3)), "2.0 GB");
-        // oltre TB resta TB
-        let big = 8 * 1024_u64.pow(4);
-        assert!(format_bytes(big).ends_with("TB"));
-    }
-}
 
 /// Pane unico dei download: alto ~2/3 della pagina, scrollabile, a RIGHE
 /// (non card). Badge stato, percentuale e bottoni sempre visibili; il nome

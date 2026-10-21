@@ -19,7 +19,18 @@ pub fn candidate_from_response_received(params: &serde_json::Value) -> Option<Me
         .and_then(|m| m.as_str())
         .unwrap_or("");
     let resource_type = params.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    classify(url, mime, resource_type)
+    let mut candidate = classify(url, mime, resource_type)?;
+    // Content-Length dagli header (chiavi case-insensitive, CDP le riporta
+    // come inviate dal server)
+    candidate.size = response
+        .get("headers")
+        .and_then(|h| h.as_object())
+        .and_then(|h| {
+            h.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        })
+        .and_then(|(_, v)| v.as_str())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    Some(candidate)
 }
 
 pub fn classify(url: &str, mime: &str, resource_type: &str) -> Option<MediaCandidate> {
@@ -30,23 +41,19 @@ pub fn classify(url: &str, mime: &str, resource_type: &str) -> Option<MediaCandi
     let mime_lower = mime.to_ascii_lowercase();
 
     if url_lower.ends_with(".m3u8") || mime_lower.contains("mpegurl") {
-        return Some(stream(url, "m3u8"));
+        return Some(MediaCandidate::new(url, true, false));
     }
     if url_lower.ends_with(".mpd") || mime_lower.contains("dash+xml") {
-        return Some(stream(url, "mpd"));
+        return Some(MediaCandidate::new(url, true, false));
     }
 
     if video_extension(&url_lower) {
-        return Some(MediaCandidate { url: url.into(), is_stream: false });
+        return Some(MediaCandidate::new(url, false, false));
     }
     if resource_type.eq_ignore_ascii_case("Media") {
-        return Some(MediaCandidate { url: url.into(), is_stream: false });
+        return Some(MediaCandidate::new(url, false, false));
     }
     None
-}
-
-fn stream(url: &str, _kind: &str) -> MediaCandidate {
-    MediaCandidate { url: url.into(), is_stream: true }
 }
 
 /// Classifica un URL raccolto dal DOM (scout JS, niente mime né resourceType).
@@ -65,13 +72,13 @@ pub fn classify_dom(url: &str, from_video: bool) -> Option<MediaCandidate> {
     }
     let url_lower = url.to_ascii_lowercase();
     if url_lower.ends_with(".m3u8") {
-        return Some(stream(url, "m3u8"));
+        return Some(MediaCandidate::new(url, true, from_video));
     }
     if url_lower.ends_with(".mpd") {
-        return Some(stream(url, "mpd"));
+        return Some(MediaCandidate::new(url, true, from_video));
     }
     if from_video || video_extension(&url_lower) {
-        return Some(MediaCandidate { url: url.into(), is_stream: false });
+        return Some(MediaCandidate::new(url, false, from_video));
     }
     None
 }
@@ -203,17 +210,42 @@ mod tests {
     #[test]
     fn candidate_set_dedups_and_caps() {
         let mut set = CandidateSet::new(2);
-        let a = MediaCandidate { url: "https://a.com/1".into(), is_stream: false };
-        let b = MediaCandidate { url: "https://a.com/2".into(), is_stream: true };
+        let a = MediaCandidate::new("https://a.com/1", false, false);
+        let b = MediaCandidate::new("https://a.com/2", true, false);
 
         assert!(set.insert(&a));
         assert!(!set.insert(&a), "dedup per URL");
         assert!(set.insert(&b));
         assert_eq!(set.len(), 2);
 
-        let c = MediaCandidate { url: "https://a.com/3".into(), is_stream: false };
+        let c = MediaCandidate::new("https://a.com/3", false, false);
         assert!(!set.insert(&c), "cap raggiunto: inoltro bloccato");
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn content_length_from_headers_case_insensitive() {
+        let params = json!({
+            "type": "Media",
+            "response": {
+                "url": "https://cdn.com/v/movie.mp4",
+                "mimeType": "video/mp4",
+                "headers": { "Content-Length": "1048576" }
+            }
+        });
+        let c = candidate_from_response_received(&params).expect("atteso");
+        assert_eq!(c.size, Some(1_048_576));
+        assert_eq!(c.name, "movie.mp4");
+
+        let params = json!({
+            "type": "Media",
+            "response": {
+                "url": "https://cdn.com/v/movie2.mp4",
+                "headers": { "content-length": "42" }
+            }
+        });
+        let c = candidate_from_response_received(&params).expect("atteso");
+        assert_eq!(c.size, Some(42));
     }
 
     #[test]

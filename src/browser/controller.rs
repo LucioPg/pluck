@@ -35,10 +35,46 @@ use windows::{
 /// true = debug sniffing; false = default.
 const VERBOSE_LOGS: bool = false;
 
-/// Estrazione titolo: chain best-effort (spec §5). ExecuteScript ritorna la
-/// stringa JSON-encoded (virgolette incluse): il handler la decodifica.
+/// Estrazione titolo: priorità all'elemento VICINO al player (i metadati
+/// pagina-level sono inaffidabili: popup, menu, SEO). Percorre anche gli
+/// iframe same-origin (dove vive spesso il player). Chain:
+/// 1. attributi title/data-title del <video>
+/// 2. heading/p precedente al <video> (nel documento del player)
+/// 3. og:title → twitter:title → h1 → title pulito (solo come fallback)
 const TITLE_JS: &str = r#"
 (function() {
+    function nearVideo(doc) {
+        if (!doc) return null;
+        for (const v of doc.querySelectorAll('video')) {
+            if (v.title && v.title.trim()) return v.title.trim();
+            const dt = v.getAttribute('data-title') || v.getAttribute('aria-label');
+            if (dt && dt.trim()) return dt.trim();
+            let el = v;
+            for (let i = 0; i < 5; i++) {
+                el = el.previousElementSibling;
+                if (!el) break;
+                if (/^(P|H[1-6])$/.test(el.tagName) && el.textContent.trim()) {
+                    return el.textContent.trim();
+                }
+            }
+            const box = v.closest('[class*="player"], [class*="video"], [id*="player"]');
+            if (box) {
+                const h = box.querySelector('h1, h2, h3, h4');
+                if (h && h.textContent.trim()) return h.textContent.trim();
+            }
+        }
+        for (const f of doc.querySelectorAll('iframe')) {
+            try {
+                if (f.contentDocument) {
+                    const t = nearVideo(f.contentDocument);
+                    if (t) return t;
+                }
+            } catch (e) { /* cross-origin */ }
+        }
+        return null;
+    }
+    const near = nearVideo(document);
+    if (near) return near;
     function clean(t) {
         t = (t || '').trim();
         let i = t.lastIndexOf('|');
@@ -55,16 +91,6 @@ const TITLE_JS: &str = r#"
     if (tw && tw.content && tw.content.trim()) return tw.content.trim();
     const h1 = document.querySelector('h1');
     if (h1 && h1.textContent.trim()) return h1.textContent.trim();
-    const v = document.querySelector('video');
-    if (v) {
-        let el = v.previousElementSibling;
-        while (el) {
-            if (/^(P|H[1-6])$/.test(el.tagName) && el.textContent.trim()) {
-                return el.textContent.trim();
-            }
-            el = el.previousElementSibling;
-        }
-    }
     return clean(document.title);
 })()
 "#;

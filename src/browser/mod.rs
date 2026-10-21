@@ -9,12 +9,97 @@ pub mod sniff;
 
 use std::path::PathBuf;
 
-/// Candidato media individuato dallo sniffing CDP.
+/// Candidato media individuato dallo sniffing (CDP o scout DOM).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaCandidate {
     pub url: String,
     /// true = playlist/manifest (m3u8/mpd): NON scaricabile (aggiornamento futuro)
     pub is_stream: bool,
+    /// Nome leggibile: ultimo segmento del path decodificato (fallback: host)
+    pub name: String,
+    /// Dimensione in byte se nota (Content-Length da CDP o probe HEAD)
+    pub size: Option<u64>,
+}
+
+impl MediaCandidate {
+    pub fn new(url: impl Into<String>, is_stream: bool, from_video: bool) -> Self {
+        let url = url.into();
+        Self {
+            name: name_from_url(&url, from_video),
+            size: None,
+            is_stream,
+            url,
+        }
+    }
+}
+
+/// Nome leggibile dall'URL: ultimo segmento del path (decodificato). Se il
+/// segmento è un endpoint tecnico (`.php`, `.aspx`, vuoto) → host + query corta.
+pub fn name_from_url(url: &str, _from_video: bool) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    let raw = parsed
+        .path()
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    // Decodifica percentuale (%XX); il '+' nel path è letterale (non form-encoding)
+    let decoded = percent_encoding::percent_decode_str(raw)
+        .decode_utf8_lossy()
+        .to_string();
+    let technical = decoded.is_empty()
+        || decoded.to_ascii_lowercase().ends_with(".php")
+        || decoded.to_ascii_lowercase().ends_with(".aspx")
+        || decoded.to_ascii_lowercase().ends_with(".jsp");
+    if technical {
+        // endpoint proxy: usa l'host come nome riconoscibile
+        let host = parsed.host_str().unwrap_or("media");
+        format!("{host}/{decoded}")
+    } else {
+        decoded
+    }
+}
+
+/// HEAD probe: dimensione del candidato DOM (senza Content-Length da CDP).
+/// Redirect seguiti (URL firmati CDN); 3s di timeout; None = non determinabile.
+pub async fn probe_size(url: &str, referer: Option<&str>) -> Option<u64> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let mut req = client.head(url);
+    if let Some(r) = referer {
+        req = req.header("Referer", r);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.headers()
+        .get(reqwest::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Formatta byte in unità leggibili (base 1024): `942 B`, `1.5 MB`, `2.0 GB`…
+pub fn format_bytes(v: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut val = v as f64;
+    let mut unit = 0usize;
+    while val >= 1024.0 && unit < UNITS.len() - 1 {
+        val /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{v} B")
+    } else {
+        format!("{val:.1} {}", UNITS[unit])
+    }
 }
 
 /// Eventi dal thread browser verso l'UI (canale tokio, `blocking_send` lato thread).
@@ -154,5 +239,40 @@ mod tests {
         // streaming: mai suggestioni m3u8/mpd
         assert_eq!(extension_from_url("https://a.com/index.m3u8"), ".mp4");
         assert_eq!(extension_from_url("https://a.com/index.mpd"), ".mp4");
+    }
+
+    #[test]
+    fn name_from_url_segments() {
+        assert_eq!(
+            name_from_url("https://cdn.com/media/2026/10/il%20mio%20video.mp4", true),
+            "il mio video.mp4"
+        );
+        assert_eq!(
+            name_from_url("https://a.com/v/clip.mp4?md5=x&expires=1", false),
+            "clip.mp4"
+        );
+    }
+
+    #[test]
+    fn name_from_url_proxy_falls_back_to_host() {
+        let n = name_from_url(
+            "https://example.com/wp-content/plugins/player-x.php?q=abc",
+            true,
+        );
+        assert_eq!(n, "example.com/player-x.php");
+        // path vuoto (solo dominio)
+        assert_eq!(name_from_url("https://cdn.com/", true), "cdn.com/");
+    }
+
+    #[test]
+    fn format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(942), "942 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(format_bytes(2 * 1024_u64.pow(3)), "2.0 GB");
+        let big = 8 * 1024_u64.pow(4);
+        assert!(format_bytes(big).ends_with("TB"));
     }
 }
