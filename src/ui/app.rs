@@ -28,7 +28,17 @@ pub fn App() -> Element {
                 let mut list = downloads.write();
                 if let Some(item) = list.iter_mut().find(|d| d.id == msg.id) {
                     if let Some(state) = msg.state {
+                        let terminal = matches!(
+                            state,
+                            DownloadState::Completed
+                                | DownloadState::Failed(_)
+                                | DownloadState::Cancelled
+                        );
                         item.state = state;
+                        // Stato terminale: il control handle non serve più a nessun comando.
+                        if terminal {
+                            controls.write().remove(&msg.id);
+                        }
                     }
                     if msg.total > 0 {
                         item.total = msg.total;

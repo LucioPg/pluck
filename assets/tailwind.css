@@ -2843,6 +2843,12 @@
       height: var(--size);
       padding-inline: calc(var(--size) / 2 - var(--border));
     }
+    .dropdown.dropdown-close .dropdown-content {
+      display: none;
+      transform-origin: top;
+      opacity: 0%;
+      scale: 95%;
+    }
   }
   .alert {
     border-width: var(--border);

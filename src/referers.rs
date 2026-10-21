@@ -10,6 +10,7 @@ pub struct RefererStore {
 
 impl RefererStore {
     /// Percorso default: `<data_dir>/ldwhelper/referers.json` (Windows: %APPDATA%)
+    /// Fallback `.` (CWD) se `dirs::data_dir()` è None (irraggiungibile su Windows).
     pub fn default_path() -> PathBuf {
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
         base.join("ldwhelper").join("referers.json")
@@ -37,6 +38,7 @@ impl RefererStore {
         self.entries.insert(0, r);
     }
 
+    /// L'UI può ignorare il Result: il file si riscriverà al prossimo save (best-effort).
     pub fn save(&self) -> Result<(), String> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all: {e}"))?;
