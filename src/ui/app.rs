@@ -126,8 +126,8 @@ pub fn App() -> Element {
 
     rsx! {
         head { style { "{TAILWIND_CSS}" } }
-        div { class: "min-h-screen bg-base-100 p-6",
-            div { class: "max-w-2xl mx-auto flex flex-col gap-4",
+        div { class: "h-screen overflow-hidden bg-base-100 p-6",
+            div { class: "max-w-2xl mx-auto h-full flex flex-col gap-4",
                 header { class: "flex items-center justify-between gap-4",
                     h1 { class: "text-2xl font-bold shrink-0", "ldwhelper" }
                     button {

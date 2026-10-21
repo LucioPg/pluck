@@ -178,7 +178,7 @@ pub fn AutoPage(
                 }
             }
 
-            div { class: "flex flex-col gap-2",
+            div { class: "flex flex-col gap-2 max-h-52 overflow-y-auto pr-1",
                 for (i, candidate) in candidates.read().iter().cloned().enumerate() {
                     { candidate_row(i, candidate, start_download.clone()) }
                 }

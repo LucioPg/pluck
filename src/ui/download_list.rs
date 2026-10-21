@@ -12,7 +12,7 @@ pub fn DownloadList(
     on_open_failed: EventHandler<String>,
 ) -> Element {
     rsx! {
-        div { class: "h-[65vh] rounded-box border border-base-300 bg-base-200/40 p-3 flex flex-col gap-2 overflow-y-auto",
+        div { class: "flex-1 min-h-0 rounded-box border border-base-300 bg-base-200/40 p-3 flex flex-col gap-1 overflow-y-auto",
             for item in downloads.read().iter() {
                 DownloadRow {
                     key: "{item.id}",
@@ -93,29 +93,32 @@ fn DownloadRow(
 
     rsx! {
         div {
-            class: "flex items-center gap-3 rounded-lg bg-base-100 px-3 py-2",
+            class: "flex items-center gap-2 rounded bg-base-100 px-2 py-1 text-xs",
             ondoubleclick: open_file,
             {badge}
             // Nome file: ellipsis se lungo, tooltip col path completo
             span {
-                class: "truncate min-w-0 flex-1 text-sm font-medium",
+                class: "truncate min-w-0 flex-1 font-medium",
                 title: "{full_path}",
                 "{name}"
             }
-            // Barra mini: sempre presente, larghezza fissa
+            // Progress circolare compatto: la % è DENTRO il cerchio
             if indeterminate {
-                progress { class: "progress progress-primary w-28 shrink-0" }
+                span {
+                    class: "loading loading-spinner loading-primary shrink-0",
+                    title: "Dimensione sconosciuta (Content-Length assente)",
+                }
             } else {
-                progress {
-                    class: "progress progress-primary w-28 shrink-0",
-                    value: "{item.current}",
-                    max: "{item.total.max(1)}",
+                div {
+                    class: "radial-progress text-primary shrink-0",
+                    style: "--value:{item.percentage()}; --size:1.9rem; --thickness:3px",
+                    "{item.percentage()}%"
                 }
             }
-            // Percentuale/dimensioni: SEMPRE visibili
-            span { class: "text-xs tabular-nums opacity-70 shrink-0 w-36 text-right",
+            // Dimensioni: sempre visibili
+            span { class: "tabular-nums opacity-70 shrink-0 w-32 text-right",
                 if item.total > 0 {
-                    "{item.percentage()}% — {item.current}/{item.total} B"
+                    "{item.current}/{item.total} B"
                 } else {
                     "{item.current} B"
                 }
