@@ -137,12 +137,15 @@ pub fn App() -> Element {
                     }
                 }
 
-                // Sezione automatica: browser in background + candidati (sempre visibile)
-                crate::ui::auto_page::AutoPage {
-                    on_download: auto_on_download,
-                    on_error: move |msg: String| {
-                        push_toast(toasts, msg);
-                    },
+                // Sezione automatica: browser in background + candidati (sempre visibile).
+                // shrink-0 + max-h: non può mai sbordare sopra il pane download.
+                div { class: "shrink-0 max-h-[45vh] overflow-y-auto",
+                    crate::ui::auto_page::AutoPage {
+                        on_download: auto_on_download,
+                        on_error: move |msg: String| {
+                            push_toast(toasts, msg);
+                        },
+                    }
                 }
 
                 // Separazione netta tra pannello principale e lista
