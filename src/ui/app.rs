@@ -155,6 +155,10 @@ pub fn App() -> Element {
                 match std::fs::remove_dir_all(&profile) {
                     Ok(()) => {
                         eprintln!("[exit] profilo cancellato ({})", profile.display());
+                        // Rimuovi anche la cartella padre se rimasta vuota
+                        if let Some(parent) = profile.parent() {
+                            let _ = std::fs::remove_dir(parent);
+                        }
                         return;
                     }
                     Err(e) if attempt < 4 => {
