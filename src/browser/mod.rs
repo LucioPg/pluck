@@ -224,8 +224,12 @@ pub fn extension_from_url(url: &str) -> String {
 }
 
 /// Percorso del profilo dedicato del browser embedded (isolato dai cookie utente).
+/// `cache_dir` = %LOCALAPPDATA% su Windows: dati effimeri cancellati a ogni
+/// uscita — mai in Roaming (che è per impostazioni che migrano tra macchine).
 pub fn profile_dir() -> PathBuf {
-    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::cache_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(std::env::temp_dir);
     base.join("ldwhelper").join("webview-profile")
 }
 
