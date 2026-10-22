@@ -16,7 +16,9 @@ fn main() {
     if let Some(icon) = icon {
         builder = builder.with_window_icon(Some(icon));
     }
-    let config = Config::new().with_window(builder);
+    // with_menu(None): senza, dioxus-desktop inietta la menu bar di default
+    // (File/Edit/View/Help) anche in release
+    let config = Config::new().with_window(builder).with_menu(None);
     dioxus::LaunchBuilder::new().with_cfg(config).launch(ui::app::App);
 }
 
