@@ -24,6 +24,7 @@ fn push_toast(mut toasts: Signal<Vec<String>>, msg: String) {
 /// Avvia il download e registra il referer nei preferiti (dedup + persist).
 /// Funzione pura su parametri Copy: chiamabile da entrambe le tab senza
 /// contorsioni di closure (il motore resta in `download/engine.rs`).
+#[allow(clippy::too_many_arguments)]
 fn launch_download(
     tx: mpsc::Sender<ProgressMessage>,
     mut downloads: Signal<Vec<DownloadItem>>,
@@ -32,6 +33,7 @@ fn launch_download(
     url: String,
     referer: Option<String>,
     dest: PathBuf,
+    thumbnail: Option<String>,
 ) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
@@ -44,6 +46,7 @@ fn launch_download(
         state: DownloadState::Downloading,
         current: 0,
         total: 0,
+        thumbnail,
     });
     let ctl = spawn_download(id, url, referer.clone(), dest, tx);
     // Referer preferiti: dedup + move-to-front, poi persistenza JSON.
@@ -98,7 +101,7 @@ pub fn App() -> Element {
     // Chiusure submit: cloni tx per consumer (le props vogliono FnMut)
     let tx_auto = tx.clone();
     let auto_on_download =
-        move |(url, referer, dest): (String, Option<String>, PathBuf)| {
+        move |(url, referer, dest, thumbnail): (String, Option<String>, PathBuf, Option<String>)| {
             launch_download(
                 tx_auto.clone(),
                 downloads,
@@ -107,22 +110,23 @@ pub fn App() -> Element {
                 url,
                 referer,
                 dest,
+                thumbnail,
             );
         };
     let tx_manual = tx.clone();
-    let manual_on_submit =
-        move |(url, referer, dest): (String, Option<String>, PathBuf)| {
-            launch_download(
-                tx_manual.clone(),
-                downloads,
-                controls,
-                referer_store,
-                url,
-                referer,
-                dest,
-            );
-            dialog_open.set(false);
-        };
+    let manual_on_submit = move |(url, referer, dest): (String, Option<String>, PathBuf)| {
+        launch_download(
+            tx_manual.clone(),
+            downloads,
+            controls,
+            referer_store,
+            url,
+            referer,
+            dest,
+            None, // download manuale: nessuna thumbnail
+        );
+        dialog_open.set(false);
+    };
 
     // Privacy: alla chiusura della finestra → shutdown browser (rilascio lock
     // profilo) + cancellazione della cartella profilo (cookie/login/cache non

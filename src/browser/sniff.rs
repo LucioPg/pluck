@@ -66,21 +66,27 @@ fn video_extension(url_lower: &str) -> bool {
         .any(|ext| path.ends_with(ext))
 }
 
-pub fn classify_dom(url: &str, from_video: bool) -> Option<MediaCandidate> {
+pub fn classify_dom(url: &str, from_video: bool, thumbnail: &str) -> Option<MediaCandidate> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return None;
     }
     let url_lower = url.to_ascii_lowercase();
-    if url_lower.ends_with(".m3u8") {
-        return Some(MediaCandidate::new(url, true, from_video));
-    }
-    if url_lower.ends_with(".mpd") {
-        return Some(MediaCandidate::new(url, true, from_video));
-    }
-    if from_video || video_extension(&url_lower) {
-        return Some(MediaCandidate::new(url, false, from_video));
-    }
-    None
+    let is_stream = url_lower.ends_with(".m3u8") || url_lower.ends_with(".mpd");
+    let mut candidate = if is_stream || from_video || video_extension(&url_lower) {
+        Some(MediaCandidate::new(url, is_stream, from_video))
+    } else {
+        None
+    }?;
+    candidate.thumbnail = valid_thumbnail(thumbnail);
+    Some(candidate)
+}
+
+/// Thumbnail accettabile: http(s) e non vuota (il webview non può caricare
+/// relativi/blob senza contesto di pagina).
+fn valid_thumbnail(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+        .then(|| trimmed.to_string())
 }
 
 /// Raccolta dedup con cap: il thread browser inoltra all'UI solo i candidati nuovi.
@@ -254,24 +260,42 @@ mod tests {
         let c = classify_dom(
             "https://sito.com/player-x.php?q=cG9zdF9pZA%3D%3D",
             true,
+            "",
         )
         .expect("candidato atteso");
         assert!(!c.is_stream);
+        assert!(c.thumbnail.is_none());
     }
 
     #[test]
     fn dom_link_only_with_video_extension() {
-        let c = classify_dom("https://sito.com/clip.mp4?token=1", false).expect("atteso");
+        let c = classify_dom("https://sito.com/clip.mp4?token=1", false, "").expect("atteso");
         assert!(!c.is_stream);
-        assert!(classify_dom("https://sito.com/pagina.html", false).is_none());
-        assert!(classify_dom("https://sito.com/thumb.jpg", false).is_none());
+        assert!(classify_dom("https://sito.com/pagina.html", false, "").is_none());
+        assert!(classify_dom("https://sito.com/thumb.jpg", false, "").is_none());
+    }
+
+    #[test]
+    fn dom_thumbnail_propagated_and_validated() {
+        let c = classify_dom(
+            "https://sito.com/clip.mp4",
+            true,
+            "https://sito.com/poster.jpg",
+        )
+        .expect("atteso");
+        assert_eq!(c.thumbnail.as_deref(), Some("https://sito.com/poster.jpg"));
+        // relativo/blob/vuoto → scartati
+        for bad in ["", "/relativo.jpg", "blob:https://sito.com/1"] {
+            let c = classify_dom("https://sito.com/clip.mp4", true, bad).expect("atteso");
+            assert!(c.thumbnail.is_none(), "thumbnail {bad:?} deve essere scartata");
+        }
     }
 
     #[test]
     fn dom_m3u8_is_stream() {
-        let c = classify_dom("https://sito.com/hls/index.m3u8", true).expect("atteso");
+        let c = classify_dom("https://sito.com/hls/index.m3u8", true, "").expect("atteso");
         assert!(c.is_stream);
         // blob: (MSE) non scaricabile → scartato, lo prende il CDP
-        assert!(classify_dom("blob:https://sito.com/1234", true).is_none());
+        assert!(classify_dom("blob:https://sito.com/1234", true, "").is_none());
     }
 }

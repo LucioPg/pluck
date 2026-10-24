@@ -1,5 +1,6 @@
 use crate::browser::format_bytes;
 use crate::download::types::{DownloadControl, DownloadId, DownloadItem, DownloadState};
+use crate::ui::thumb::Thumb;
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
@@ -100,6 +101,8 @@ fn DownloadRow(
                 "cursor-default flex items-center gap-2 rounded-lg bg-base-100 px-3 py-0.5 text-xs shadow-sm"
             },
             ondoubleclick: open_file,
+            // Thumbnail quadrata del candidato sorgente (placeholder se None)
+            Thumb { url: item.thumbnail.clone() }
             {badge}
             // Nome file: ellipsis se lungo, tooltip col path completo
             span {

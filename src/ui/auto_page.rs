@@ -6,6 +6,7 @@
 //! background puro, opzione "mostra pagina" scartata).
 
 use crate::browser;
+use crate::ui::thumb::Thumb;
 use dioxus::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -14,8 +15,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[component]
 pub fn AutoPage(
-    /// (url, referer, destinazione) — chiamato al termine della save dialog
-    on_download: EventHandler<(String, Option<String>, PathBuf)>,
+    /// (url, referer, destinazione, thumbnail) — chiamato al termine della save dialog
+    on_download: EventHandler<(String, Option<String>, PathBuf, Option<String>)>,
     /// Toast errori (init WebView2, save dialog)
     on_error: EventHandler<String>,
 ) -> Element {
@@ -107,10 +108,12 @@ pub fn AutoPage(
             if let Some(handle) = dialog.save_file().await
                 && let Some(path) = handle.path().to_str()
             {
+                let thumbnail = candidate.thumbnail.clone();
                 on_download((
                     candidate.url,
                     if referer.is_empty() { None } else { Some(referer) },
                     PathBuf::from(path),
+                    thumbnail,
                 ));
             }
             browsing.set(false);
@@ -219,7 +222,15 @@ pub fn AutoPage(
 
             div { class: "flex flex-col gap-2 max-h-52 overflow-y-auto pr-1",
                 for (i, candidate) in candidates.read().iter().cloned().enumerate() {
-                    { candidate_row(i, candidate, start_download.clone()) }
+                    CandidateRow {
+                        key: "{i}-{candidate.url}",
+                        index: i,
+                        candidate: candidate.clone(),
+                        on_download: {
+                            let cb = start_download.clone();
+                            move |c: browser::MediaCandidate| cb(c)
+                        },
+                    }
                 }
                 if candidates.read().is_empty() && load_error.read().is_none() && !*loading.read() {
                     div { class: "text-sm text-base-content/50",
@@ -231,13 +242,12 @@ pub fn AutoPage(
     }
 }
 
-fn candidate_row(
+#[component]
+fn CandidateRow(
     index: usize,
     candidate: browser::MediaCandidate,
-    start_download: Rc<dyn Fn(browser::MediaCandidate)>,
+    on_download: EventHandler<browser::MediaCandidate>,
 ) -> Element {
-    // Due copie: una per il display (prendibile a prestito dal RSX), una per la
-    // closure del click (consumata)
     let candidate_for_click = candidate.clone();
     let size_label = match candidate.size {
         Some(b) => browser::format_bytes(b),
@@ -247,6 +257,8 @@ fn candidate_row(
         div {
             key: "{index}-{candidate.url}",
             class: "flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1 text-xs shadow-sm",
+            // Thumbnail quadrata (poster/og:image) o placeholder
+            Thumb { url: candidate.thumbnail.clone() }
             span {
                 class: if candidate.is_stream {
                     "badge badge-warning badge-sm shrink-0"
@@ -275,7 +287,7 @@ fn candidate_row(
             } else {
                 button {
                     class: "btn btn-xs btn-primary shrink-0",
-                    onclick: move |_| start_download(candidate_for_click.clone()),
+                    onclick: move |_| on_download.call(candidate_for_click.clone()),
                     "Scarica"
                 }
             }
@@ -445,6 +457,17 @@ fn init_browser(
                     // NavigationCompleted: la pagina è caricata, lo spinner può
                     // sparire anche se il titolo è vuoto
                     loading.set(false);
+                }
+                browser::BrowserEvent::PageThumb(thumb) => {
+                    // Backfill: candidati CDP arrivati prima dell'estrazione
+                    // (e senza poster proprio) prendono la thumb di pagina
+                    eprintln!("[auto] thumbnail di pagina ricevuta: backfill candidati");
+                    let mut list = candidates.write();
+                    for c in list.iter_mut() {
+                        if c.thumbnail.is_none() {
+                            c.thumbnail = Some(thumb.clone());
+                        }
+                    }
                 }
                 browser::BrowserEvent::Error(msg) => {
                     eprintln!("[auto] ERRORE browser: {msg}");

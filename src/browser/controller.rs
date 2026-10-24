@@ -36,7 +36,8 @@ use windows::{
 /// true = debug sniffing; false = default.
 const VERBOSE_LOGS: bool = false;
 
-/// Estrazione titolo: priorita' all'elemento vicino al player. Chain completa:
+/// Estrazione titolo + thumbnail di pagina (ritorna JSON `{t, th}`). Priorita'
+/// titolo all'elemento vicino al player. Chain completa:
 /// 1. attributi title/data-title del <video>
 /// 2. heading/p precedente al <video> (documento del player, iframe ricorsivi)
 /// 3. heading [id/class*="title"] risalendo i padri del player
@@ -45,6 +46,7 @@ const VERBOSE_LOGS: bool = false;
 ///    popup/descrizione-eta', caso tranny.one #lawH1 prima di #mTitle)
 const TITLE_JS: &str = r#"
 (function() {
+    const __title = (function() {
     const BAD_TEXT = /(age[- ]restrict|this website|warning|disclaimer|pornograph|materials may|consent|18\+|entering|by entering)/i;
     const BAD_SIG = /(law|modal|popup|overlay|consent|agegate|age-gate|disclaimer)/i;
     function okEl(el) {
@@ -113,6 +115,20 @@ const TITLE_JS: &str = r#"
     const any = document.querySelector('h1');
     if (any) return any.textContent.trim();
     return '';
+    })();
+    // Thumbnail di pagina: og:image → twitter:image → poster del primo <video>
+    let __h = '';
+    const ogi = document.querySelector('meta[property="og:image"]');
+    if (ogi && ogi.content && ogi.content.trim()) __h = ogi.content.trim();
+    if (!__h) {
+        const twi = document.querySelector('meta[name="twitter:image"]');
+        if (twi && twi.content && twi.content.trim()) __h = twi.content.trim();
+    }
+    if (!__h) {
+        const v = document.querySelector('video');
+        if (v && v.poster) __h = v.poster;
+    }
+    return JSON.stringify({ t: __title, th: __h });
 })()
 "#;
 
@@ -130,12 +146,18 @@ const SCOUT_TICK_JS: &str = r#"
         if (!doc) return;
         doc.querySelectorAll('video, video source').forEach(el => {
             const u = el.currentSrc || el.src || el.getAttribute('src') || '';
-            if (u && !window.__lwSeen[u]) { window.__lwSeen[u] = 1; out.push({ url: u, from_video: true }); }
+            if (u && !window.__lwSeen[u]) {
+                window.__lwSeen[u] = 1;
+                const v = el.tagName === 'VIDEO' ? el : el.closest('video');
+                out.push({ url: u, from_video: true, thumbnail: (v && v.poster) || '' });
+            }
         });
         doc.querySelectorAll('a[href]').forEach(a => {
             const h = a.getAttribute('href') || '';
             if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !window.__lwSeen[h]) {
-                window.__lwSeen[h] = 1; out.push({ url: h, from_video: false });
+                window.__lwSeen[h] = 1;
+                const im = a.querySelector('img');
+                out.push({ url: h, from_video: false, thumbnail: (im && im.src) || '' });
             }
         });
         doc.querySelectorAll('video').forEach(v => {
@@ -321,6 +343,11 @@ fn browser_thread(
     // Dedup CONDIVISO tra scout DOM e CDP (possono vedere lo stesso URL):
     // creato PRIMA delle registrazioni che lo catturano
     let candidates = std::rc::Rc::new(std::cell::RefCell::new(CandidateSet::new(500)));
+    // Thumbnail di pagina corrente (og:image/twitter:image/poster): estratta a
+    // ogni NavigationCompleted, attaccata come fallback ai candidati CDP (che
+    // non hanno contesto DOM). Reset a ogni navigazione (exec).
+    let page_thumb: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
     let _ = webview.add_SourceChanged(
         &SourceChangedEventHandler::create(Box::new(move |webview, _args| {
             if let Some(webview) = webview {
@@ -338,6 +365,7 @@ fn browser_thread(
 
     // Titolo dopo ogni navigazione completata + attivazione scout (§5)
     let title_events = events.clone();
+    let title_page_thumb = page_thumb.clone();
     let scout_webview = webview.clone();
     let scout_deadline = std::rc::Rc::new(std::cell::Cell::new(
         Option::<std::time::Instant>::None,
@@ -353,15 +381,22 @@ fn browser_thread(
             move |_webview, _args| {
             eprintln!("[browser] navigazione completata: estraggo titolo + attivo scout (20s)");
             let title_events = title_events.clone();
+            let page_thumb = title_page_thumb.clone();
             let _ = scout_webview.ExecuteScript(
                 &HSTRING::from(TITLE_JS),
                 &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
                     error_code?;
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json)
-                        && let Some(title) = v.as_str()
-                    {
-                        eprintln!("[browser] titolo: {title}");
-                        let _ = title_events.send(BrowserEvent::Title(title.to_string()));
+                    // TITLE_JS ritorna {t: titolo, th: thumbnail di pagina}
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                        if let Some(title) = v["t"].as_str() {
+                            eprintln!("[browser] titolo: {title}");
+                            let _ = title_events.send(BrowserEvent::Title(title.to_string()));
+                        }
+                        let thumb = v["th"].as_str().unwrap_or("").trim().to_string();
+                        if !thumb.is_empty() {
+                            *page_thumb.borrow_mut() = Some(thumb.clone());
+                            let _ = title_events.send(BrowserEvent::PageThumb(thumb));
+                        }
                     }
                     Ok(())
                 })),
@@ -409,6 +444,7 @@ fn browser_thread(
         eprintln!("[browser] receiver Network.responseReceived registrato");
         let cdp_events = events.clone();
         let cdp_candidates = candidates.clone();
+        let cdp_page_thumb = page_thumb.clone();
         let _ = receiver.add_DevToolsProtocolEventReceived(
             &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
                 move |_webview, args| {
@@ -425,15 +461,24 @@ fn browser_thread(
                                 {
                                     eprintln!("[browser] CDP response: {url}");
                                 }
-                                if let Some(candidate) =
+                                if let Some(mut candidate) =
                                     candidate_from_response_received(&value)
-                                    && cdp_candidates.borrow_mut().insert(&candidate)
                                 {
-                                    eprintln!(
-                                        "[browser] candidato: {} (stream={})",
-                                        candidate.url, candidate.is_stream
-                                    );
-                                    let _ = cdp_events.send(BrowserEvent::Candidate(candidate));
+                                    // I candidati CDP non hanno contesto DOM: la
+                                    // thumbnail di pagina è il fallback migliore
+                                    if candidate.thumbnail.is_none()
+                                        && let Some(t) = cdp_page_thumb.borrow().clone()
+                                    {
+                                        candidate.thumbnail = Some(t);
+                                    }
+                                    if cdp_candidates.borrow_mut().insert(&candidate) {
+                                        eprintln!(
+                                            "[browser] candidato: {} (stream={})",
+                                            candidate.url, candidate.is_stream
+                                        );
+                                        let _ =
+                                            cdp_events.send(BrowserEvent::Candidate(candidate));
+                                    }
                                 }
                             }
                         }
@@ -472,7 +517,7 @@ fn browser_thread(
                 return;
             }
             eprintln!("[browser] comando ricevuto");
-            exec(&controller, &webview, cmd);
+            exec(&controller, &webview, cmd, &page_thumb);
         }
         // Scout DOM a tick (spec §5): ogni 1s fino a 20s dal load, ExecuteScript
         // ISTANTANEO che ritorna i nuovi URL trovati nel DOM live
@@ -505,8 +550,10 @@ fn browser_thread(
                         for item in items {
                             if let Some(url) = item["url"].as_str() {
                                 let from_video = item["from_video"].as_bool().unwrap_or(false);
+                                let thumbnail = item["thumbnail"].as_str().unwrap_or("");
                                 eprintln!("[browser] DOM scout: {url}");
-                                if let Some(candidate) = classify_dom(url, from_video)
+                                if let Some(candidate) =
+                                    classify_dom(url, from_video, thumbnail)
                                     && scout_candidates.borrow_mut().insert(&candidate)
                                 {
                                     eprintln!(
@@ -537,16 +584,21 @@ fn exec(
     controller: &ICoreWebView2Controller,
     webview: &ICoreWebView2,
     cmd: BrowserCommand,
+    page_thumb: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
 ) {
     unsafe {
         match cmd {
             BrowserCommand::Navigate(url) => {
+                // Nuova pagina: la thumbnail di pagina precedente è stantia
+                page_thumb.borrow_mut().take();
                 let _ = webview.Navigate(&HSTRING::from(url));
             }
             BrowserCommand::Back => {
+                page_thumb.borrow_mut().take();
                 let _ = webview.GoBack();
             }
             BrowserCommand::Reload => {
+                page_thumb.borrow_mut().take();
                 let _ = webview.Reload();
             }
             BrowserCommand::SetVisible(visible) => {

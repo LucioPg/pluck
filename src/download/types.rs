@@ -27,6 +27,8 @@ pub struct DownloadItem {
     pub current: u64,
     /// 0 = Content-Length assente → barra indeterminata
     pub total: u64,
+    /// Thumbnail del candidato sorgente (None per download manuali)
+    pub thumbnail: Option<String>,
 }
 
 impl DownloadItem {
@@ -65,6 +67,7 @@ mod tests {
             state: DownloadState::Downloading,
             current,
             total,
+            thumbnail: None,
         }
     }
 

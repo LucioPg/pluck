@@ -19,6 +19,9 @@ pub struct MediaCandidate {
     pub name: String,
     /// Dimensione in byte se nota (Content-Length da CDP o probe HEAD)
     pub size: Option<u64>,
+    /// Thumbnail: poster del `<video>`/img dell'anchor (scout) o thumb di
+    /// pagina (og:image, fallback per i candidati CDP)
+    pub thumbnail: Option<String>,
 }
 
 impl MediaCandidate {
@@ -29,6 +32,7 @@ impl MediaCandidate {
             size: None,
             is_stream,
             url,
+            thumbnail: None,
         }
     }
 }
@@ -111,6 +115,9 @@ pub enum BrowserEvent {
     PageUrl(String),
     /// Titolo estratto dal DOM live (chain og:title → h1 → title)
     Title(String),
+    /// Thumbnail di pagina (og:image/twitter:image/poster): l'UI riempie i
+    /// candidati ancora senza thumbnail. Stringa vuota = nessuna trovata.
+    PageThumb(String),
     /// Runtime WebView2 assente o init fallita
     Error(String),
 }
