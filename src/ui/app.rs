@@ -198,7 +198,7 @@ pub fn App() -> Element {
         div { class: "h-screen overflow-hidden bg-base-100 p-6",
             div { class: "max-w-2xl mx-auto h-full flex flex-col gap-4",
                 header { class: "flex items-center justify-between gap-4",
-                    h1 { class: "text-2xl font-bold shrink-0", "ldwhelper" }
+                    h1 { class: "text-2xl font-bold shrink-0", "ldwhelper v{env!(\"CARGO_PKG_VERSION\")}" }
                     button {
                         class: "btn btn-primary",
                         onclick: move |_| dialog_open.set(true),
