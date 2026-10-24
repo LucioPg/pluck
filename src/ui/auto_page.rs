@@ -26,6 +26,10 @@ pub fn AutoPage(
     // Guard anti doppio-click sulla save dialog (Cell: basta, il dialog modale blocca
     // comunque le interazioni; nessuna reattività necessaria)
     let browsing: Rc<Cell<bool>> = use_hook(|| Rc::new(Cell::new(false)));
+    // Vero quando l'utente modifica l'URL dopo una navigazione: gli eventi in
+    // arrivo dal browser (candidati, titolo, URL) sono stantî e vanno scartati
+    // finché il prossimo "Vai" non resetta il flag.
+    let url_dirty: Rc<Cell<bool>> = use_hook(|| Rc::new(Cell::new(false)));
 
     let mut address = use_signal(String::new);
     let candidates = use_signal(Vec::<browser::MediaCandidate>::new);
@@ -39,9 +43,11 @@ pub fn AutoPage(
 
     let bs_init = browser_state.clone();
     let init_flag = initialized.clone();
+    let dirty_init = url_dirty.clone();
     use_effect(move || {
         if !init_flag.get() {
             init_flag.set(true);
+            // Clone: la closure è FnMut, non può consumare la cattura
             init_browser(
                 bs_init.clone(),
                 address,
@@ -50,12 +56,14 @@ pub fn AutoPage(
                 page_title,
                 load_error,
                 loading,
+                dirty_init.clone(),
                 on_error,
             );
         }
     });
 
     let bs_go = browser_state.clone();
+    let dirty_go = url_dirty.clone();
     let init_go = (
         initialized.clone(),
         address,
@@ -67,7 +75,7 @@ pub fn AutoPage(
         on_error,
     );
     let go = move |_| {
-        navigate(&bs_go, &init_go);
+        navigate(&bs_go, &init_go, &dirty_go);
     };
 
     // Click su candidato: save dialog nativa precompilata → download.
@@ -136,7 +144,15 @@ pub fn AutoPage(
                     r#type: "url",
                     placeholder: "https://esempio.com/pagina-con-video",
                     value: "{address}",
-                    oninput: move |e| address.set(e.value()),
+                    // Qualsiasi modifica/cancellazione dell'URL invalida i
+                    // risultati della pagina precedente
+                    oninput: {
+                        let url_dirty = url_dirty.clone();
+                        move |e| {
+                            address.set(e.value());
+                            clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading);
+                        }
+                    },
                     onkeydown: {
                         let bs = browser_state.clone();
                         let init = (
@@ -149,9 +165,10 @@ pub fn AutoPage(
                             loading,
                             on_error,
                         );
+                        let dirty = url_dirty.clone();
                         move |e| {
                             if e.key() == Key::Enter {
-                                navigate(&bs, &init);
+                                navigate(&bs, &init, &dirty);
                             }
                         }
                     },
@@ -160,8 +177,12 @@ pub fn AutoPage(
                     class: "btn btn-sm btn-ghost",
                     aria_label: "Cancella indirizzo",
                     title: "Cancella il campo indirizzo",
-                    onclick: move |_| {
-                        address.set(String::new());
+                    onclick: {
+                        let url_dirty = url_dirty.clone();
+                        move |_| {
+                            address.set(String::new());
+                            clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading);
+                        }
                     },
                     "✕"
                 }
@@ -275,12 +296,33 @@ type InitState = (
     EventHandler<String>,
 );
 
+/// Svuota i risultati della pagina corrente (candidati, titolo/URL, errori) e
+/// marca gli eventi del browser come stantî: mentre l'utente modifica l'URL,
+/// scout e CDP continuerebbero a produrre dati della pagina vecchia.
+/// Ferma anche lo spinner: il Title della pagina vecchia verrà scartato.
+fn clear_results(
+    url_dirty: &Rc<Cell<bool>>,
+    mut candidates: Signal<Vec<browser::MediaCandidate>>,
+    mut page_url: Signal<String>,
+    mut page_title: Signal<String>,
+    mut load_error: Signal<Option<String>>,
+    mut loading: Signal<bool>,
+) {
+    url_dirty.set(true);
+    candidates.write().clear();
+    page_url.set(String::new());
+    page_title.set(String::new());
+    load_error.set(None);
+    loading.set(false);
+}
+
 /// Naviga: init lazy se necessario, reset candidati/stato, comando Navigate.
 /// L'init qui è la cintura di sicurezza: se l'use_effect non si ri-attiva al
 /// cambio tab (tracking), il primo "Vai" inita comunque il browser.
 fn navigate(
     browser_state: &Rc<RefCell<Option<browser::BrowserHandle>>>,
     init: &InitState,
+    url_dirty: &Rc<Cell<bool>>,
 ) {
     let (initialized, address, candidates, page_url, page_title, load_error, loading, on_error) = init;
     // Copie dei Signal: set/write vogliono binding mut (KB dioxus)
@@ -303,6 +345,7 @@ fn navigate(
             page_title,
             load_error,
             loading,
+            url_dirty.clone(),
             *on_error,
         );
     }
@@ -313,6 +356,9 @@ fn navigate(
     load_error.set(None);
     candidates.write().clear();
     page_title.set(String::new());
+    // Riaccetta gli eventi del browser: da qui in poi sono della nuova pagina
+    // (subito, prima del comando Navigate, per non perdere i primi eventi)
+    url_dirty.set(false);
     loading.set(true);
     match browser_state.borrow().as_ref() {
         Some(handle) => {
@@ -324,7 +370,8 @@ fn navigate(
 }
 
 /// Init lazy: thread WebView2 + task consumatore eventi (candidati, URL, titolo,
-/// errori → toast).
+/// errori → toast). Con `url_dirty` attivo gli eventi sono stantî (l'utente ha
+/// modificato l'URL dopo l'ultima navigazione) e vengono scartati.
 #[allow(clippy::too_many_arguments)]
 fn init_browser(
     browser_state: Rc<RefCell<Option<browser::BrowserHandle>>>,
@@ -334,6 +381,7 @@ fn init_browser(
     mut page_title: Signal<String>,
     mut load_error: Signal<Option<String>>,
     mut loading: Signal<bool>,
+    url_dirty: Rc<Cell<bool>>,
     on_error: EventHandler<String>,
 ) {
     let dx = dioxus::desktop::window();
@@ -354,6 +402,11 @@ fn init_browser(
 
     spawn(async move {
         while let Some(ev) = event_rx.recv().await {
+            // URL modificato dall'utente dopo l'ultima navigazione: tutto ciò
+            // che il browser produce riguarda la pagina vecchia → scartato
+            if url_dirty.get() {
+                continue;
+            }
             match ev {
                 browser::BrowserEvent::Candidate(c) => {
                     eprintln!("[auto] candidato ricevuto: {} (stream={})", c.url, c.is_stream);
