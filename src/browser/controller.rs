@@ -386,8 +386,13 @@ fn browser_thread(
                 &HSTRING::from(TITLE_JS),
                 &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
                     error_code?;
+                    // ExecuteScript incapsula il ritorno: la stringa JS di
+                    // TITLE_JS arriva come JSON string → doppio parse
+                    let Ok(payload) = serde_json::from_str::<String>(&json) else {
+                        return Ok(());
+                    };
                     // TITLE_JS ritorna {t: titolo, th: thumbnail di pagina}
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
                         if let Some(title) = v["t"].as_str() {
                             eprintln!("[browser] titolo: {title}");
                             let _ = title_events.send(BrowserEvent::Title(title.to_string()));

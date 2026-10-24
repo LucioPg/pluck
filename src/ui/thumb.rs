@@ -17,7 +17,7 @@ pub fn Thumb(
     let mut broken = use_signal(|| false);
     let show_img = url.as_ref().is_some_and(|u| !u.is_empty()) && !*broken.read();
     rsx! {
-        div { class: "w-8 h-8 shrink-0 bg-base-300 overflow-hidden",
+        div { class: "w-16 h-16 shrink-0 bg-base-300 overflow-hidden",
             if show_img {
                 img {
                     src: url.clone().unwrap(),
