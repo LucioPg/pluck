@@ -458,8 +458,9 @@ fn init_browser(
                     list.insert(0, c.clone());
                     list.truncate(200);
                     drop(list);
-                    // Dimensione mancante (candidato DOM) → probe HEAD async
-                    // con referer = pagina corrente; aggiorna la riga al termine
+                    // Dimensione mancante: probe HEAD async per i media diretti,
+                    // stima da manifest per gli stream HLS (referer = pagina corrente);
+                    // aggiorna la riga al termine
                     if c.size.is_none() && !c.is_stream {
                         let referer = page_url.read().trim().to_string();
                         let mut candidates_updater = candidates;
@@ -471,6 +472,22 @@ fn init_browser(
                                 if let Some(item) =
                                     list.iter_mut().find(|i| i.url == c.url)
                                 {
+                                    item.size = Some(size);
+                                }
+                            }
+                        });
+                    } else if c.is_stream {
+                        let referer = page_url.read().trim().to_string();
+                        let mut candidates_updater = candidates;
+                        spawn(async move {
+                            if let Some(size) = crate::download::hls::probe_hls_size(
+                                &c.url,
+                                Some(referer.as_str()).filter(|r| !r.is_empty()),
+                            )
+                            .await
+                            {
+                                let mut list = candidates_updater.write();
+                                if let Some(item) = list.iter_mut().find(|i| i.url == c.url) {
                                     item.size = Some(size);
                                 }
                             }

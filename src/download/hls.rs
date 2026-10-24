@@ -63,6 +63,7 @@ async fn run_hls(
     let total = match fetch_duration(&url, referer.as_deref()).await {
         Ok(t) => t,
         Err(reason) => {
+            eprintln!("[hls] {id} durata fallita: {reason}");
             let _ = tx
                 .send(ProgressMessage {
                     id,
@@ -74,14 +75,19 @@ async fn run_hls(
             return;
         }
     };
+    eprintln!("[hls] {id} durata manifest: {total:?}");
     report(None, 0, total.unwrap_or(0)).await;
 
     // ffmpeg: cache nostra → PATH/accanto all'exe → download una tantum con
     // progresso in byte (il default del sidecar scrive accanto all'exe: in
     // Program Files non è scrivibile)
     let ff_path = match ensure_ffmpeg(&tx, id).await {
-        Ok(p) => p,
+        Ok(p) => {
+            eprintln!("[hls] {id} ffmpeg: {}", p.display());
+            p
+        }
         Err(e) => {
+            eprintln!("[hls] {id} ffmpeg acquire fallita: {e}");
             let _ = tx
                 .send(ProgressMessage {
                     id,
@@ -94,13 +100,16 @@ async fn run_hls(
         }
     };
 
-    // Comando: remux diretto, nessuna ricodifica
+    // Comando: remux diretto, nessuna ricodifica.
+    // NOTA: il crate ffmpeg-sidecar NON legge stdout quando l'output va su
+    // file (spawn_stdout_thread esce subito) → `-progress pipe:1` non arriva
+    // a nessuno. Il progresso arriva dalle righe stats su STDERR
+    // (frame=... time=...), quindi: loglevel warning + -stats.
     let mut cmd = FfmpegCommand::new_with_path(&ff_path);
     cmd.arg("-hide_banner")
         .arg("-loglevel")
-        .arg("error")
-        .arg("-progress")
-        .arg("pipe:1")
+        .arg("warning")
+        .arg("-stats")
         .arg("-user_agent")
         .arg(USER_AGENT);
     if let Some(r) = &referer {
@@ -115,8 +124,12 @@ async fn run_hls(
         .create_no_window();
 
     let mut child = match cmd.spawn() {
-        Ok(c) => c,
+        Ok(c) => {
+            eprintln!("[hls] {id} ffmpeg spawn ok");
+            c
+        }
         Err(e) => {
+            eprintln!("[hls] {id} ffmpeg spawn fallito: {e}");
             let _ = tx
                 .send(ProgressMessage {
                     id,
@@ -165,6 +178,7 @@ async fn run_hls(
         let mut cancelled = false;
         let mut err_tail: Vec<String> = Vec::new();
         let mut last_secs = 0u64;
+        let mut progress_seen = 0usize;
         for ev in iterator {
             if cancel_loop.is_cancelled() {
                 cancelled = true;
@@ -175,6 +189,10 @@ async fn run_hls(
             }
             match ev {
                 FfmpegEvent::Progress(p) => {
+                    progress_seen += 1;
+                    if progress_seen == 1 || progress_seen.is_multiple_of(20) {
+                        eprintln!("[hls] {id} progress #{progress_seen}: time={}", p.time);
+                    }
                     let secs = parse_progress_time(&p.time) as u64;
                     // Throttle 1s: riduce il churn di render sull'UI
                     if secs > last_secs {
@@ -203,6 +221,10 @@ async fn run_hls(
             .ok()
             .and_then(|mut c| c.wait().ok())
             .is_some_and(|s| s.success());
+        eprintln!(
+            "[hls] {id} ffmpeg terminato: cancelled={cancelled} exit_ok={exit_ok} progress_seen={progress_seen} err={:?}",
+            err_tail.last().cloned().unwrap_or_default()
+        );
         (cancelled, exit_ok, err_tail)
     })
     .await
@@ -314,31 +336,14 @@ fn parse_progress_time(s: &str) -> f64 {
     secs
 }
 
-/// Durata totale del contenuto: media playlist → somma EXTINF; master →
-/// variante a bandwidth maggiore → ricorsione. `Err(motivo)` = non
-/// scaricabile (stream live senza EXT-X-ENDLIST: ffmpeg non terminerebbe mai).
-/// `Ok(None)` = durata indeterminabile (si procede con barra indeterminata).
+/// Durata totale del contenuto: media playlist → somma EXTINF. `Err(motivo)`
+/// = non scaricabile (stream live senza EXT-X-ENDLIST: ffmpeg non terminerebbe
+/// mai). `Ok(None)` = durata indeterminabile (barra indeterminata).
 async fn fetch_duration(url: &str, referer: Option<&str>) -> Result<Option<u64>, String> {
-    let text = fetch_text(url, referer)
+    let media = media_playlist_text(url, referer)
         .await
         .ok_or("manifest m3u8 non raggiungibile")?;
-    match m3u8_rs::parse_playlist_res(text.as_bytes()) {
-        Ok(m3u8_rs::Playlist::MasterPlaylist(master)) => {
-            // Variante di qualità massima = bandwidth maggiore
-            let best = master
-                .variants
-                .iter()
-                .max_by_key(|v| v.bandwidth)
-                .ok_or("playlist master senza varianti")?;
-            let uri = resolve_uri(url, &best.uri).ok_or("URI variante malformato")?;
-            let inner = fetch_text(&uri, referer)
-                .await
-                .ok_or("variante non raggiungibile")?;
-            check_and_sum(&inner)
-        }
-        Ok(m3u8_rs::Playlist::MediaPlaylist(_)) => check_and_sum(&text),
-        Err(_) => Ok(None),
-    }
+    check_and_sum(&media)
 }
 
 /// Somma le durate se la playlist è VOD; errore sugli stream live.
@@ -371,6 +376,82 @@ fn resolve_uri(base: &str, uri: &str) -> Option<String> {
         .join(uri)
         .ok()
         .map(|u| u.to_string())
+}
+
+/// Testo della media playlist: segue la variante migliore se il manifest è master.
+async fn media_playlist_text(url: &str, referer: Option<&str>) -> Option<String> {
+    let text = fetch_text(url, referer).await?;
+    match m3u8_rs::parse_playlist_res(text.as_bytes()) {
+        Ok(m3u8_rs::Playlist::MasterPlaylist(master)) => {
+            let best = master.variants.iter().max_by_key(|v| v.bandwidth)?;
+            let uri = resolve_uri(url, &best.uri)?;
+            fetch_text(&uri, referer).await
+        }
+        Ok(m3u8_rs::Playlist::MediaPlaylist(_)) => Some(text),
+        Err(_) => None,
+    }
+}
+
+/// Content-Length via HEAD, fallback GET Range (alcuni CDN rifiutano HEAD).
+async fn content_length(url: &str, referer: Option<&str>) -> Option<u64> {
+    let client = http_client()?;
+    let mut head = client.head(url);
+    if let Some(r) = referer {
+        head = head.header("Referer", r);
+    }
+    if let Ok(resp) = head.send().await
+        && resp.status().is_success()
+        && let Some(v) = content_length_header(resp.headers())
+    {
+        return Some(v);
+    }
+    let mut rng = client.get(url).header("Range", "bytes=0-0");
+    if let Some(r) = referer {
+        rng = rng.header("Referer", r);
+    }
+    let resp = rng.send().await.ok()?;
+    let cr = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?
+        .to_string();
+    cr.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+fn content_length_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+fn http_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()
+}
+
+/// Stima della dimensione finale di un contenuto HLS: durata totale dal
+/// manifest × (byte del primo segmento / durata del primo segmento).
+/// I manifest HLS non espongono la dimensione totale: è una stima (bitrate
+/// costante approssimato dal primo chunk), 2 richieste di rete in tutto.
+pub async fn probe_hls_size(url: &str, referer: Option<&str>) -> Option<u64> {
+    let media = media_playlist_text(url, referer).await?;
+    let pl = m3u8_rs::parse_media_playlist_res(media.as_bytes()).ok()?;
+    let total_dur: f64 = pl.segments.iter().map(|s| s.duration as f64).sum();
+    let first = pl.segments.first()?;
+    if first.duration <= 0.0 || total_dur <= 0.0 {
+        return None;
+    }
+    let seg_uri = resolve_uri(url, &first.uri)?;
+    let seg_bytes = content_length(&seg_uri, referer).await?;
+    Some((seg_bytes as f64 * total_dur / first.duration as f64) as u64)
 }
 
 #[cfg(test)]
