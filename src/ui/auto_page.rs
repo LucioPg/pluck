@@ -39,6 +39,8 @@ pub fn AutoPage(
     let load_error = use_signal(|| Option::<String>::None);
     // Vero da "Vai" fino a NavigationCompleted (Title) o errore: feedback processo in corso
     let loading = use_signal(|| false);
+    // Pubblicità rilevata dallo scout: finestra estesa, tentativi in corso
+    let ad_wait = use_signal(|| false);
 
     let url_ok = reqwest::Url::parse(address.read().trim()).is_ok();
 
@@ -57,6 +59,7 @@ pub fn AutoPage(
                 page_title,
                 load_error,
                 loading,
+                ad_wait,
                 dirty_init.clone(),
                 on_error,
             );
@@ -73,6 +76,7 @@ pub fn AutoPage(
         page_title,
         load_error,
         loading,
+        ad_wait,
         on_error,
     );
     let go = move |_| {
@@ -134,7 +138,10 @@ pub fn AutoPage(
                     title: "Ricarica: riavvia anche lo sniffing dei media",
                     onclick: {
                         let bs = browser_state.clone();
+                        let mut aw = ad_wait;
                         move |_| {
+                            // La nuova pagina riparte da zero anche per l'ad
+                            aw.set(false);
                             if let Some(handle) = bs.borrow().as_ref() {
                                 handle.reload();
                             }
@@ -153,7 +160,7 @@ pub fn AutoPage(
                         let url_dirty = url_dirty.clone();
                         move |e| {
                             address.set(e.value());
-                            clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading);
+                            clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading, ad_wait);
                         }
                     },
                     onkeydown: {
@@ -166,6 +173,7 @@ pub fn AutoPage(
                             page_title,
                             load_error,
                             loading,
+                            ad_wait,
                             on_error,
                         );
                         let dirty = url_dirty.clone();
@@ -184,7 +192,7 @@ pub fn AutoPage(
                         let url_dirty = url_dirty.clone();
                         move |_| {
                             address.set(String::new());
-                            clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading);
+                            clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading, ad_wait);
                         }
                     },
                     "✕"
@@ -202,11 +210,18 @@ pub fn AutoPage(
             }
 
             // Stato pagina: spinner durante la navigazione, poi titolo + URL
-            // correnti (info mentre il browser è nascosto)
+            // correnti (info mentre il browser è nascosto). Ad rilevata → testo
+            // dedicato anche a load finito (i tentativi continuano)
             div { class: "text-sm text-base-content/60 truncate flex items-center gap-2",
-                if *loading.read() {
+                if *loading.read() && !*ad_wait.read() {
                     span { class: "loading loading-spinner loading-xs", aria_label: "Caricamento in corso" }
                     span { "Caricamento pagina…" }
+                } else if *loading.read() && *ad_wait.read() {
+                    span { class: "loading loading-spinner loading-xs", aria_label: "Scansione in corso" }
+                    span { "Rilevata pubblicità: attendo il contenuto…" }
+                } else if *ad_wait.read() {
+                    span { class: "loading loading-spinner loading-xs", aria_label: "Scansione in corso" }
+                    span { "Rilevata pubblicità: catturo il contenuto…" }
                 } else if page_title.read().trim().is_empty() {
                     "Nessuna pagina caricata"
                 } else {
@@ -305,6 +320,7 @@ type InitState = (
     Signal<String>,
     Signal<Option<String>>,
     Signal<bool>,
+    Signal<bool>,
     EventHandler<String>,
 );
 
@@ -319,6 +335,7 @@ fn clear_results(
     mut page_title: Signal<String>,
     mut load_error: Signal<Option<String>>,
     mut loading: Signal<bool>,
+    mut ad_wait: Signal<bool>,
 ) {
     url_dirty.set(true);
     candidates.write().clear();
@@ -326,6 +343,7 @@ fn clear_results(
     page_title.set(String::new());
     load_error.set(None);
     loading.set(false);
+    ad_wait.set(false);
 }
 
 /// Naviga: init lazy se necessario, reset candidati/stato, comando Navigate.
@@ -336,13 +354,14 @@ fn navigate(
     init: &InitState,
     url_dirty: &Rc<Cell<bool>>,
 ) {
-    let (initialized, address, candidates, page_url, page_title, load_error, loading, on_error) = init;
+    let (initialized, address, candidates, page_url, page_title, load_error, loading, ad_wait, on_error) = init;
     // Copie dei Signal: set/write vogliono binding mut (KB dioxus)
     let address = *address;
     let mut candidates = *candidates;
     let mut page_title = *page_title;
     let mut load_error = *load_error;
     let mut loading = *loading;
+    let mut ad_wait = *ad_wait;
     if browser_state.borrow().is_none() {
         if initialized.get() {
             eprintln!("[auto] ATTENZIONE: init segnato done ma handle assente — reinizo");
@@ -357,6 +376,7 @@ fn navigate(
             page_title,
             load_error,
             loading,
+            ad_wait,
             url_dirty.clone(),
             *on_error,
         );
@@ -372,6 +392,7 @@ fn navigate(
     // (subito, prima del comando Navigate, per non perdere i primi eventi)
     url_dirty.set(false);
     loading.set(true);
+    ad_wait.set(false);
     match browser_state.borrow().as_ref() {
         Some(handle) => {
             eprintln!("[auto] navigate: {url}");
@@ -393,6 +414,7 @@ fn init_browser(
     mut page_title: Signal<String>,
     mut load_error: Signal<Option<String>>,
     mut loading: Signal<bool>,
+    mut ad_wait: Signal<bool>,
     url_dirty: Rc<Cell<bool>>,
     on_error: EventHandler<String>,
 ) {
@@ -457,6 +479,11 @@ fn init_browser(
                     // NavigationCompleted: la pagina è caricata, lo spinner può
                     // sparire anche se il titolo è vuoto
                     loading.set(false);
+                    ad_wait.set(false);
+                }
+                browser::BrowserEvent::AdWait(active) => {
+                    eprintln!("[auto] ad scout esteso: attivo={active}");
+                    ad_wait.set(active);
                 }
                 browser::BrowserEvent::PageThumb(thumb) => {
                     // Backfill: candidati CDP arrivati prima dell'estrazione
@@ -473,6 +500,7 @@ fn init_browser(
                     eprintln!("[auto] ERRORE browser: {msg}");
                     load_error.set(Some(msg.clone()));
                     loading.set(false);
+                    ad_wait.set(false);
                     on_error.call(msg);
                 }
             }

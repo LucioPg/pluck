@@ -33,11 +33,30 @@ pub fn candidate_from_response_received(params: &serde_json::Value) -> Option<Me
     Some(candidate)
 }
 
+/// URL di advertising (pattern forti e conservativi, dominio o segmento path
+/// inequivocabile): i media serviti da questi host non diventano candidati.
+pub fn is_ad_url(url_lower: &str) -> bool {
+    const TOKENS: [&str; 8] = [
+        "doubleclick",
+        "googlesyndication",
+        "adservice",
+        "adsystem",
+        "adcreative",
+        "adserver",
+        "/ads/",
+        "/ad/",
+    ];
+    url_lower.contains("advert") || TOKENS.iter().any(|t| url_lower.contains(t))
+}
+
 pub fn classify(url: &str, mime: &str, resource_type: &str) -> Option<MediaCandidate> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return None;
     }
     let url_lower = url.to_ascii_lowercase();
+    if is_ad_url(&url_lower) {
+        return None;
+    }
     let mime_lower = mime.to_ascii_lowercase();
 
     if url_lower.ends_with(".m3u8") || mime_lower.contains("mpegurl") {
@@ -71,6 +90,9 @@ pub fn classify_dom(url: &str, from_video: bool, thumbnail: &str) -> Option<Medi
         return None;
     }
     let url_lower = url.to_ascii_lowercase();
+    if is_ad_url(&url_lower) {
+        return None;
+    }
     let is_stream = url_lower.ends_with(".m3u8") || url_lower.ends_with(".mpd");
     let mut candidate = if is_stream || from_video || video_extension(&url_lower) {
         Some(MediaCandidate::new(url, is_stream, from_video))
@@ -289,6 +311,24 @@ mod tests {
             let c = classify_dom("https://sito.com/clip.mp4", true, bad).expect("atteso");
             assert!(c.thumbnail.is_none(), "thumbnail {bad:?} deve essere scartata");
         }
+    }
+
+    #[test]
+    fn ad_urls_are_never_candidates() {
+        // CDP e DOM: gli host/segmenti advertising pubblici sono scartati
+        assert!(classify("https://pubads.g.doubleclick.net/v.mp4", "video/mp4", "Media").is_none());
+        assert!(classify(
+            "https://cdn.com/ads/spot.mp4",
+            "video/mp4",
+            "Media"
+        )
+        .is_none());
+        assert!(classify_dom("https://sito.com/ad/clip.mp4", true, "").is_none());
+        assert!(classify_dom("https://googlesyndication.com/x.m3u8", true, "").is_none());
+        // falsi positivi da evitare: "/add/", "/read/", "upload" passano
+        assert!(classify_dom("https://sito.com/add/clip.mp4", true, "").is_some());
+        assert!(classify_dom("https://sito.com/read/clip.mp4", false, "").is_some());
+        assert!(classify_dom("https://sito.com/upload/clip.mp4", false, "").is_some());
     }
 
     #[test]

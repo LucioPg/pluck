@@ -118,6 +118,9 @@ pub enum BrowserEvent {
     /// Thumbnail di pagina (og:image/twitter:image/poster): l'UI riempie i
     /// candidati ancora senza thumbnail. Stringa vuota = nessuna trovata.
     PageThumb(String),
+    /// Rilevata pubblicità: finestra scout estesa (true) o terminata (false).
+    /// L'UI lo mostra accanto allo spinner come feedback dei tentativi.
+    AdWait(bool),
     /// Runtime WebView2 assente o init fallita
     Error(String),
 }

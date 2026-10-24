@@ -133,15 +133,28 @@ const TITLE_JS: &str = r#"
 "#;
 
 /// Scout DOM — TICK istantaneo guidato da Rust: il pump loop lo lancia ogni 1s
-/// dopo ogni navigazione (per 20s). Stato in window.__lwSeen (persiste nella
-/// pagina): ogni tick ritorna SOLO i nuovi URL trovati. RICORSIVO negli iframe
-/// same-origin (il player è spesso una pagina embeddata — es. player-x.php);
-/// cross-origin → contentDocument null → skip (quelli li vede il CDP). Il play
-/// muted avviene una volta per video. Niente Promise né postMessage.
+/// dopo ogni navigazione (per 20s, estesi finché è attiva una pubblicità).
+/// Stato in window.__lwSeen (persiste nella pagina): ogni tick ritorna SOLO i
+/// nuovi URL trovati + flag ad_active. RICORSIVO negli iframe same-origin (il
+/// player è spesso una pagina embeddata — es. player-x.php); cross-origin →
+/// contentDocument null → skip (quelli li vede il CDP). Il play muted avviene
+/// una volta per video; se è stata vista una pubblicità, i video pausi vengono
+/// riavviati a ogni tick (pre-roll finito → riparte il contenuto). Niente
+/// Promise né postMessage.
 const SCOUT_TICK_JS: &str = r#"
 (function() {
-    if (!window.__lwSeen) { window.__lwSeen = {}; window.__lwPlayed = {}; }
+    if (!window.__lwSeen) { window.__lwSeen = {}; window.__lwPlayed = {}; window.__lwHadAd = false; }
     const out = [];
+    const AD_URL = /(doubleclick|googlesyndication|adservice|adsystem|adcreative|adserver|\/ads?\/)/i;
+    const AD_DOM = /(ad[-_]?showing|ytp-ad|jw-ad|ad-overlay|adsbox|advertisement|ad-container|ad-banner)/i;
+    let adActive = false;
+    function adLike(v) {
+        if (AD_URL.test(v.currentSrc || v.src || '')) return true;
+        // Durata nota e corta = quasi sicuramente pubblicità (i contenuti sono
+        // più lunghi; NaN/Infinity = live o metadata assenti → non conta)
+        const d = v.duration;
+        return !isNaN(d) && d > 0 && d < 60 && !v.ended;
+    }
     function collect(doc) {
         if (!doc) return;
         doc.querySelectorAll('video, video source').forEach(el => {
@@ -161,8 +174,19 @@ const SCOUT_TICK_JS: &str = r#"
             }
         });
         doc.querySelectorAll('video').forEach(v => {
-            const key = (doc === document ? '' : 'i:') + (v.currentSrc || v.src || '');
-            if (v.paused && !window.__lwPlayed[key]) {
+            const src = v.currentSrc || v.src || '';
+            const key = (doc === document ? '' : 'i:') + src;
+            if (adLike(v)) { adActive = true; window.__lwHadAd = true; }
+            if (!adActive) {
+                let el = v;
+                for (let d = 0; el && d < 3; d++, el = el.parentElement) {
+                    const sig = (el.id || '') + ' ' + (el.className || '');
+                    if (AD_DOM.test(sig)) { adActive = true; window.__lwHadAd = true; break; }
+                }
+            }
+            // Play muted: una volta per src; se è passata una pubblicità,
+            // riavvia anche i video già giocati (contenuto dopo il pre-roll)
+            if (v.paused && src && (!window.__lwPlayed[key] || window.__lwHadAd)) {
                 window.__lwPlayed[key] = 1;
                 v.muted = true;
                 const p = v.play();
@@ -174,7 +198,7 @@ const SCOUT_TICK_JS: &str = r#"
         });
     }
     collect(document);
-    return JSON.stringify(out);
+    return JSON.stringify({ items: out, ad_active: adActive });
 })()
 "#;
 
@@ -373,11 +397,21 @@ fn browser_thread(
     let scout_last = std::rc::Rc::new(std::cell::Cell::new(
         Option::<std::time::Instant>::None,
     ));
+    // Ancoraggio della navigazione corrente: cap totale di estensioni scout
+    // per la pubblicità (90s dalla navigazione, poi si rinuncia)
+    let scout_since = std::rc::Rc::new(std::cell::Cell::new(
+        Option::<std::time::Instant>::None,
+    ));
+    // AdWait(true) già inviato all'UI per questa finestra: evita un evento a
+    // ogni tick mentre la pubblicità gira
+    let ad_notified = std::rc::Rc::new(std::cell::Cell::new(false));
     let scout_tick_events = events.clone();
     let scout_tick_candidates = candidates.clone();
     let _ = webview.add_NavigationCompleted(
         &NavigationCompletedEventHandler::create(Box::new({
             let scout_deadline = scout_deadline.clone();
+            let scout_since = scout_since.clone();
+            let ad_notified = ad_notified.clone();
             move |_webview, _args| {
             eprintln!("[browser] navigazione completata: estraggo titolo + attivo scout (20s)");
             let title_events = title_events.clone();
@@ -407,6 +441,8 @@ fn browser_thread(
                 })),
             );
             scout_deadline.set(Some(std::time::Instant::now() + std::time::Duration::from_secs(20)));
+            scout_since.set(Some(std::time::Instant::now()));
+            ad_notified.set(false);
             Ok(())
             }
         })),
@@ -530,7 +566,11 @@ fn browser_thread(
             let now = std::time::Instant::now();
             if now >= deadline {
                 scout_deadline.set(None);
-                eprintln!("[browser] scout: finestra 20s terminata");
+                // Fine finestra scout: chiudi l'eventuale segnalazione ad
+                if ad_notified.replace(false) {
+                    let _ = scout_tick_events.send(BrowserEvent::AdWait(false));
+                }
+                eprintln!("[browser] scout: finestra terminata");
             } else if scout_last
                 .get()
                 .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
@@ -538,6 +578,9 @@ fn browser_thread(
                 scout_last.set(Some(now));
                 let scout_events = scout_tick_events.clone();
                 let scout_candidates = scout_tick_candidates.clone();
+                let scout_deadline = scout_deadline.clone();
+                let scout_since = scout_since.clone();
+                let ad_notified = ad_notified.clone();
                 let _ = webview.ExecuteScript(
                     &HSTRING::from(SCOUT_TICK_JS),
                     &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
@@ -545,10 +588,18 @@ fn browser_thread(
                             eprintln!("[browser] ERRORE scout tick: {e}");
                             return Ok(());
                         }
+                        // SCOUT_TICK_JS ritorna {items: [...], ad_active: bool}
                         let Ok(payload) = serde_json::from_str::<String>(&json) else {
                             return Ok(());
                         };
-                        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&payload)
+                        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload)
+                        else {
+                            return Ok(());
+                        };
+                        let Ok(items) =
+                            serde_json::from_value::<Vec<serde_json::Value>>(
+                                parsed["items"].clone(),
+                            )
                         else {
                             return Ok(());
                         };
@@ -568,6 +619,30 @@ fn browser_thread(
                                     let _ = scout_events.send(BrowserEvent::Candidate(candidate));
                                 }
                             }
+                        }
+                        // Pubblicità attiva: estendi la finestra scout (cap 90s
+                        // dalla navigazione) e segnala all'UI il tentativo in corso
+                        if parsed["ad_active"].as_bool().unwrap_or(false) {
+                            let within_cap = scout_since
+                                .get()
+                                .is_some_and(|t| {
+                                    std::time::Instant::now().duration_since(t)
+                                        < std::time::Duration::from_secs(90)
+                                });
+                            if within_cap {
+                                scout_deadline.set(Some(
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_secs(20),
+                                ));
+                                if !ad_notified.replace(true) {
+                                    eprintln!("[browser] pubblicità attiva: finestra scout estesa");
+                                    let _ = scout_events.send(BrowserEvent::AdWait(true));
+                                }
+                            }
+                        } else if ad_notified.replace(false) {
+                            // Ad finita: la finestra resta per il tempo residuo,
+                            // la segnalazione UI si spegne
+                            let _ = scout_events.send(BrowserEvent::AdWait(false));
                         }
                         Ok(())
                     })),
