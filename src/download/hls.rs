@@ -59,8 +59,21 @@ async fn run_hls(
         }
     };
 
-    // Durata totale dal manifest (per la %); None → barra indeterminata
-    let total = fetch_duration(&url, referer.as_deref()).await;
+    // Durata totale dal manifest (per la %); Err = non scaricabile (live)
+    let total = match fetch_duration(&url, referer.as_deref()).await {
+        Ok(t) => t,
+        Err(reason) => {
+            let _ = tx
+                .send(ProgressMessage {
+                    id,
+                    state: Some(DownloadState::Failed(reason)),
+                    current: 0,
+                    total: 0,
+                })
+                .await;
+            return;
+        }
+    };
     report(None, 0, total.unwrap_or(0)).await;
 
     // ffmpeg: cache nostra → PATH/accanto all'exe → download una tantum con
@@ -302,26 +315,40 @@ fn parse_progress_time(s: &str) -> f64 {
 }
 
 /// Durata totale del contenuto: media playlist → somma EXTINF; master →
-/// variante a bandwidth maggiore → ricorsione. None = indeterminabile.
-async fn fetch_duration(url: &str, referer: Option<&str>) -> Option<u64> {
-    let text = fetch_text(url, referer).await?;
+/// variante a bandwidth maggiore → ricorsione. `Err(motivo)` = non
+/// scaricabile (stream live senza EXT-X-ENDLIST: ffmpeg non terminerebbe mai).
+/// `Ok(None)` = durata indeterminabile (si procede con barra indeterminata).
+async fn fetch_duration(url: &str, referer: Option<&str>) -> Result<Option<u64>, String> {
+    let text = fetch_text(url, referer)
+        .await
+        .ok_or("manifest m3u8 non raggiungibile")?;
     match m3u8_rs::parse_playlist_res(text.as_bytes()) {
         Ok(m3u8_rs::Playlist::MasterPlaylist(master)) => {
             // Variante di qualità massima = bandwidth maggiore
-            let best = master.variants.iter().max_by_key(|v| v.bandwidth)?;
-            let uri = resolve_uri(url, &best.uri)?;
-            let inner = fetch_text(&uri, referer).await?;
-            sum_media(&inner).map(|d| d as u64)
+            let best = master
+                .variants
+                .iter()
+                .max_by_key(|v| v.bandwidth)
+                .ok_or("playlist master senza varianti")?;
+            let uri = resolve_uri(url, &best.uri).ok_or("URI variante malformato")?;
+            let inner = fetch_text(&uri, referer)
+                .await
+                .ok_or("variante non raggiungibile")?;
+            check_and_sum(&inner)
         }
-        Ok(m3u8_rs::Playlist::MediaPlaylist(_)) => sum_media(&text).map(|d| d as u64),
-        Err(_) => None,
+        Ok(m3u8_rs::Playlist::MediaPlaylist(_)) => check_and_sum(&text),
+        Err(_) => Ok(None),
     }
 }
 
-/// Somma delle durate EXTINF dei segmenti (VOD). None se il parse fallisce.
-fn sum_media(text: &str) -> Option<f64> {
-    let pl = m3u8_rs::parse_media_playlist_res(text.as_bytes()).ok()?;
-    Some(pl.segments.iter().map(|s| s.duration as f64).sum())
+/// Somma le durate se la playlist è VOD; errore sugli stream live.
+fn check_and_sum(text: &str) -> Result<Option<u64>, String> {
+    let pl = m3u8_rs::parse_media_playlist_res(text.as_bytes())
+        .map_err(|_| "playlist media non valida")?;
+    if !pl.end_list {
+        return Err("Stream live: solo contenuti VOD sono scaricabili".into());
+    }
+    Ok(Some(pl.segments.iter().map(|s| s.duration as f64).sum::<f64>() as u64))
 }
 
 async fn fetch_text(url: &str, referer: Option<&str>) -> Option<String> {
@@ -361,8 +388,14 @@ mod tests {
     #[test]
     fn media_playlist_duration_sum() {
         let text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:9.5,\na.ts\n#EXTINF:10.5,\nb.ts\n#EXT-X-ENDLIST\n";
-        assert_eq!(sum_media(text), Some(20.0));
-        assert_eq!(sum_media("not a playlist"), None);
+        assert_eq!(check_and_sum(text).ok().flatten(), Some(20));
+        assert_eq!(check_and_sum("not a playlist"), Err("playlist media non valida".into()));
+    }
+
+    #[test]
+    fn live_playlist_rejected() {
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:9.5,\na.ts\n";
+        assert!(check_and_sum(text).is_err());
     }
 
     #[test]
