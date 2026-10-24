@@ -22,12 +22,14 @@ use webview2_com::{
 use windows::{
     core::{HSTRING, Interface, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, HWND, RECT},
+        Foundation::{CloseHandle, HWND, LPARAM, RECT},
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
-        System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
+        System::Threading::{GetCurrentThreadId, OpenProcess, TerminateProcess, PROCESS_TERMINATE},
         UI::WindowsAndMessaging::{
-            DispatchMessageW, GetClientRect, MSG, MsgWaitForMultipleObjectsEx, PeekMessageW,
-            PM_REMOVE, QS_ALLINPUT, MWMO_INPUTAVAILABLE, TranslateMessage,
+            DispatchMessageW, EnumChildWindows, GetClientRect, GetWindowThreadProcessId, HWND_BOTTOM,
+            MSG, MsgWaitForMultipleObjectsEx, PeekMessageW, PM_REMOVE, QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            TranslateMessage,
         },
     },
 };
@@ -148,6 +150,22 @@ const SCOUT_TICK_JS: &str = r#"
 (function() {
     if (!window.__lwSeen) { window.__lwSeen = {}; window.__lwPlayed = {}; window.__lwHadAd = false; }
     const out = [];
+    if (!window.__lwDiag) {
+        window.__lwDiag = true;
+        try {
+            const vids = [...document.querySelectorAll('video')].map(v => ({
+                src: (v.currentSrc || v.src || '').slice(0, 70),
+                paused: v.paused, rs: v.readyState, ns: v.networkState,
+                err: v.error ? (v.error.code + ' ' + v.error.message).slice(0, 90) : null,
+                buf: v.buffered.length ? Math.round(v.buffered.end(v.buffered.length - 1)) : 0
+            }));
+            const res = performance.getEntriesByType('resource')
+                .map(r => r.name)
+                .filter(n => /vcdn|ahcdn|m3u8|\.ts(\?|$)|segment/i.test(n))
+                .map(n => n.slice(0, 120)).slice(0, 12);
+            out.push({ url: '__diag__' + JSON.stringify({ vids: vids, res: res, hls: typeof window.Hls }), from_video: false, thumbnail: '' });
+        } catch (e) { out.push({ url: '__diag__err:' + e, from_video: false, thumbnail: '' }); }
+    }
     const AD_URL = /(doubleclick|googlesyndication|adservice|adsystem|adcreative|adserver|\/ads?\/)/i;
     const AD_DOM = /(ad[-_]?showing|ytp-ad|jw-ad|ad-overlay|adsbox|advertisement|ad-container|ad-banner)/i;
     let adActive = false;
@@ -246,8 +264,13 @@ fn browser_thread(
     // Autoplay senza user gesture: i player HLS (hls.js) avviano il load dei
     // segmenti solo dopo un play() che nell'WebView2 invisibile viene negato
     // (preload assente → zero fetch → zero eventi CDP, caso example.com)
+    // + niente occlusion tracking: il browser sta dietro l'UI dell'app e
+    // Chromium altrimenti lo tratterebbe come occluso → pagina "hidden" →
+    // i player con visibility-gating non caricano mai (stesso sintomo)
     options.set_additional_browser_arguments(
-        "--autoplay-policy=no-user-gesture-required".into(),
+        "--autoplay-policy=no-user-gesture-required \
+         --disable-features=CalculateNativeWinOcclusion"
+            .into(),
     );
 
     let environment = {
@@ -317,12 +340,16 @@ fn browser_thread(
         }
     };
 
-    // Nascosto per sempre (browser in background), ma con bounds = client rect
-    // del padre: alcuni siti saltano il caricamento dei media su viewport 0×0.
-    let _ = controller.SetIsVisible(false);
+    // Invisibile = document.hidden=true → i player tube-site (example.com)
+    // gate-ano l'avvio HLS sulla visibilità e non caricano MAI il manifest.
+    // Soluzione stealth: controller VISIBILE (pagina "visible", player parte)
+    // ma gli HWND figli del browser finiscono in fondo allo Z-order, coperti
+    // dalla webview dell'app → l'utente non vede mai il browser.
+    let _ = controller.SetIsVisible(true);
     let mut client = RECT::default();
     let _ = GetClientRect(HWND(parent_hwnd as _), &mut client);
     let _ = controller.SetBounds(client);
+    push_browser_windows_below(parent_hwnd);
 
     let Ok(webview) = controller.CoreWebView2() else {
         eprintln!("[browser] ERRORE: CoreWebView2 assente");
@@ -619,6 +646,11 @@ fn browser_thread(
                                     eprintln!("[browser] play() rifiutato: {err}");
                                     continue;
                                 }
+                                // Diagnostica: stato player al primo tick scout
+                                if let Some(d) = url.strip_prefix("__diag__") {
+                                    eprintln!("[browser] DIAG {d}");
+                                    continue;
+                                }
                                 let from_video = item["from_video"].as_bool().unwrap_or(false);
                                 let thumbnail = item["thumbnail"].as_str().unwrap_or("");
                                 eprintln!("[browser] DOM scout: {url}");
@@ -671,6 +703,45 @@ fn browser_thread(
             let _ = MsgWaitForMultipleObjectsEx(None, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
     }
+    }
+}
+
+/// Sposta in fondo allo Z-order le finestre figlie create dal thread browser:
+/// la pagina resta "visible" per il player, ma è coperta dalla UI dell'app.
+fn push_browser_windows_below(parent_hwnd: isize) {
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let list = unsafe { &mut *(lparam.0 as *mut Vec<isize>) };
+        list.push(hwnd.0 as isize);
+        windows::core::BOOL(1)
+    }
+    let browser_tid = unsafe { GetCurrentThreadId() };
+    let mut children: Vec<isize> = Vec::new();
+    unsafe {
+        let _ = EnumChildWindows(
+            Some(HWND(parent_hwnd as _)),
+            Some(collect),
+            LPARAM(&mut children as *mut Vec<isize> as isize),
+        );
+    }
+    // Dal fondo della lista verso l'alto: l'ordine relativo tra i figli del
+    // browser si conserva, e tutti finiscono sotto le finestre degli altri thread
+    for raw in children.iter().rev() {
+        let hwnd = HWND(*raw as _);
+        let mut tid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut tid)) };
+        if tid == browser_tid {
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_BOTTOM),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
     }
 }
 

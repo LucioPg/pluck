@@ -49,12 +49,28 @@ pub fn is_ad_url(url_lower: &str) -> bool {
     url_lower.contains("advert") || TOKENS.iter().any(|t| url_lower.contains(t))
 }
 
+/// Segmenti HLS/DASH (chunk di ~10-60s): inutili da scaricare singolarmente —
+/// il manifest li copre e finirebbe in lista un file per chunk.
+pub fn is_media_segment(url_lower: &str) -> bool {
+    // .m4s esiste SOLO come segmento DASH
+    if url_lower.ends_with(".m4s") {
+        return true;
+    }
+    let file = url_lower.split(['?', '#']).next().unwrap_or(url_lower);
+    let file = file.rsplit('/').next().unwrap_or("");
+    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    let stem = stem.to_ascii_lowercase();
+    // seg-1-v1-a1.ts / segment12.ts / seg_0007.ts
+    (stem.starts_with("seg") || stem.starts_with("chunk"))
+        && stem.chars().any(|c| c.is_ascii_digit())
+}
+
 pub fn classify(url: &str, mime: &str, resource_type: &str) -> Option<MediaCandidate> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return None;
     }
     let url_lower = url.to_ascii_lowercase();
-    if is_ad_url(&url_lower) {
+    if is_ad_url(&url_lower) || is_media_segment(&url_lower) {
         return None;
     }
     let mime_lower = mime.to_ascii_lowercase();
@@ -90,7 +106,7 @@ pub fn classify_dom(url: &str, from_video: bool, thumbnail: &str) -> Option<Medi
         return None;
     }
     let url_lower = url.to_ascii_lowercase();
-    if is_ad_url(&url_lower) {
+    if is_ad_url(&url_lower) || is_media_segment(&url_lower) {
         return None;
     }
     let is_stream = url_lower.ends_with(".m3u8") || url_lower.ends_with(".mpd");
@@ -311,6 +327,17 @@ mod tests {
             let c = classify_dom("https://sito.com/clip.mp4", true, bad).expect("atteso");
             assert!(c.thumbnail.is_none(), "thumbnail {bad:?} deve essere scartata");
         }
+    }
+
+    #[test]
+    fn media_segments_are_filtered() {
+        assert!(classify("https://cdn.com/hls/seg-1-v1-a1.ts", "video/mp2t", "Media").is_none());
+        assert!(classify("https://cdn.com/dash/index_3.m4s", "video/iso.segment", "Media").is_none());
+        assert!(classify_dom("https://cdn.com/hls/segment12.ts", false, "").is_none());
+        assert!(classify_dom("https://cdn.com/hls/chunk_0007.ts", false, "").is_none());
+        // .ts generico (non segmento) e tutto il resto passano
+        assert!(classify_dom("https://sito.com/movie.ts", false, "").is_some());
+        assert!(classify_dom("https://sito.com/clip.mp4", false, "").is_some());
     }
 
     #[test]
