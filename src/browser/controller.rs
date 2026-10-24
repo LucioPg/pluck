@@ -33,8 +33,11 @@ use windows::{
 };
 
 /// Log diagnostico esteso (raw CDP, tick scout vuoti): rumore per l'uso normale.
-/// true = debug sniffing; false = default.
-const VERBOSE_LOGS: bool = false;
+/// Attivo con variabile d'ambiente LDW_VERBOSE=1 (debug sniffing).
+fn verbose_logs() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("LDW_VERBOSE").map(|v| v == "1").unwrap_or(false))
+}
 
 /// Estrazione titolo + thumbnail di pagina (ritorna JSON `{t, th}`). Priorita'
 /// titolo all'elemento vicino al player. Chain completa:
@@ -494,7 +497,7 @@ fn browser_thread(
                         if args.ParameterObjectAsJson(&mut json).is_ok() {
                             let json = take_pwstr(json);
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                                if VERBOSE_LOGS
+                                if verbose_logs()
                                     && let Some(url) =
                                         value["response"]["url"].as_str().map(|u| {
                                             u.chars().take(140).collect::<String>()
