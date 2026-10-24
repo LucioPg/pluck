@@ -231,7 +231,7 @@ fn browser_thread(
     // Tutto il corpo è COM: un solo blocco unsafe (edition 2024: le unsafe fn
     // non permettono più op unsafe implicite nel body)
     unsafe {
-    eprintln!("[browser] thread avviato: hwnd={parent_hwnd}, profilo={}", user_data_dir.display());
+    eprintln!("[browser] thread avviato: hwnd={parent_hwnd}, profilo={}, verbose={}", user_data_dir.display(), verbose_logs());
     // S_FALSE (già inizializzata) arriva come Ok: solo gli errori veri bloccano
     if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
         eprintln!("[browser] ERRORE: CoInitializeEx fallita");
