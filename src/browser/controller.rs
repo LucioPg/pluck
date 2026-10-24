@@ -193,7 +193,7 @@ const SCOUT_TICK_JS: &str = r#"
                 window.__lwPlayed[key] = 1;
                 v.muted = true;
                 const p = v.play();
-                if (p && p.catch) p.catch(() => {});
+                if (p && p.catch) p.catch(e => out.push({ url: '__play_error__:' + (e && e.name || 'unknown'), from_video: false, thumbnail: '' }));
             }
         });
         doc.querySelectorAll('iframe').forEach(f => {
@@ -243,6 +243,12 @@ fn browser_thread(
     // Lingua fissa en-US: i siti con subdomain localizzato (it.X.com) devono
     // restare sul default (scelta utente), non seguire la lingua di Windows
     options.set_language("en-US".into());
+    // Autoplay senza user gesture: i player HLS (hls.js) avviano il load dei
+    // segmenti solo dopo un play() che nell'WebView2 invisibile viene negato
+    // (preload assente → zero fetch → zero eventi CDP, caso example.com)
+    options.set_additional_browser_arguments(
+        "--autoplay-policy=no-user-gesture-required".into(),
+    );
 
     let environment = {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -608,6 +614,11 @@ fn browser_thread(
                         };
                         for item in items {
                             if let Some(url) = item["url"].as_str() {
+                                // Diagnostica: rifiuto del play() (autoplay negato)
+                                if let Some(err) = url.strip_prefix("__play_error__") {
+                                    eprintln!("[browser] play() rifiutato: {err}");
+                                    continue;
+                                }
                                 let from_video = item["from_video"].as_bool().unwrap_or(false);
                                 let thumbnail = item["thumbnail"].as_str().unwrap_or("");
                                 eprintln!("[browser] DOM scout: {url}");
