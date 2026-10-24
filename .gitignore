@@ -2,3 +2,4 @@
 .idea
 # CSS build deps
 node_modules/
+.playwright-mcp/
