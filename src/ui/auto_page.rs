@@ -152,8 +152,25 @@ pub fn AutoPage(
                 input {
                     class: "input input-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500",
                     r#type: "url",
+                    id: "url-input",
                     placeholder: "https://esempio.com/pagina-con-video",
                     value: "{address}",
+                    // Riacquisizione del focus su campo pieno: i risultati
+                    // vengono svuotati (come il tasto ✕, ma l'URL resta) e il
+                    // testo selezionato — il nuovo testo sostituisce il vecchio
+                    onfocus: {
+                        let url_dirty = url_dirty.clone();
+                        move |_| {
+                            if !address.read().trim().is_empty() {
+                                clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading, ad_wait);
+                            }
+                            // select() differito: il mouseup che segue il click
+                            // cancellerebbe una selezione fatta dentro l'evento focus
+                            let _ = dioxus::document::eval(
+                                "setTimeout(() => document.getElementById('url-input').select(), 50)",
+                            );
+                        }
+                    },
                     // Qualsiasi modifica/cancellazione dell'URL invalida i
                     // risultati della pagina precedente
                     oninput: {
