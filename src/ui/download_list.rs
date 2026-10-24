@@ -1,5 +1,7 @@
 use crate::browser::format_bytes;
-use crate::download::types::{DownloadControl, DownloadId, DownloadItem, DownloadState};
+use crate::download::types::{
+    format_time, DownloadControl, DownloadId, DownloadItem, DownloadState,
+};
 use crate::ui::thumb::Thumb;
 use dioxus::prelude::*;
 use std::collections::HashMap;
@@ -89,7 +91,9 @@ fn DownloadRow(
             span { class: "badge badge-ghost shrink-0", "In pausa" }
         },
         DownloadState::Downloading => rsx! {
-            span { class: "badge badge-primary shrink-0", "Download" }
+            span { class: "badge badge-primary shrink-0",
+                if item.is_hls { "Stream" } else { "Download" }
+            }
         },
     };
 
@@ -123,16 +127,25 @@ fn DownloadRow(
                     "{item.percentage()}%"
                 }
             }
-            // Dimensioni: sempre visibili, in unità leggibili
+            // Dimensioni: sempre visibili. HLS = tempo (current/total sono
+            // secondi), engine normale = byte
             span { class: "tabular-nums opacity-70 shrink-0 w-36 text-right",
-                if item.total > 0 {
+                if item.is_hls {
+                    if item.total > 0 {
+                        "{format_time(item.current)} / {format_time(item.total)}"
+                    } else if item.current > 0 {
+                        "{format_time(item.current)}"
+                    } else {
+                        "…"
+                    }
+                } else if item.total > 0 {
                     "{format_bytes(item.current)} / {format_bytes(item.total)}"
                 } else {
                     "{format_bytes(item.current)}"
                 }
             }
             div { class: "flex gap-1 shrink-0",
-                if item.state == DownloadState::Downloading {
+                if item.state == DownloadState::Downloading && !item.is_hls {
                     button {
                         class: "btn btn-xs",
                         onclick: move |_| {

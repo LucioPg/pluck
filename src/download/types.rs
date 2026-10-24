@@ -29,11 +29,25 @@ pub struct DownloadItem {
     pub total: u64,
     /// Thumbnail del candidato sorgente (None per download manuali)
     pub thumbnail: Option<String>,
+    /// true = stream HLS: current/total in SECONDI, niente pausa
+    pub is_hls: bool,
 }
 
 impl DownloadItem {
     pub fn percentage(&self) -> u64 {
         (self.current * 100).checked_div(self.total).unwrap_or(0)
+    }
+}
+
+/// Secondi → `mm:ss` o `h:mm:ss` (progresso HLS, current/total in secondi).
+pub fn format_time(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
     }
 }
 
@@ -68,6 +82,7 @@ mod tests {
             current,
             total,
             thumbnail: None,
+            is_hls: false,
         }
     }
 
@@ -87,5 +102,13 @@ mod tests {
     fn percentage_full() {
         let item = test_item(200, 200);
         assert_eq!(item.percentage(), 100);
+    }
+
+    #[test]
+    fn format_time_units() {
+        assert_eq!(format_time(0), "00:00");
+        assert_eq!(format_time(65), "01:05");
+        assert_eq!(format_time(3600), "1:00:00");
+        assert_eq!(format_time(7385), "2:03:05");
     }
 }

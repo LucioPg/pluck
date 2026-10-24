@@ -13,10 +13,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// (url, referer, destinazione, thumbnail, is_stream) — richiesta di download
+/// dal click su candidato fino a `launch_download`.
+pub type DownloadRequest = (String, Option<String>, PathBuf, Option<String>, bool);
+
 #[component]
 pub fn AutoPage(
-    /// (url, referer, destinazione, thumbnail) — chiamato al termine della save dialog
-    on_download: EventHandler<(String, Option<String>, PathBuf, Option<String>)>,
+    /// Chiamato al termine della save dialog
+    on_download: EventHandler<DownloadRequest>,
     /// Toast errori (init WebView2, save dialog)
     on_error: EventHandler<String>,
 ) -> Element {
@@ -118,14 +122,12 @@ pub fn AutoPage(
                     if referer.is_empty() { None } else { Some(referer) },
                     PathBuf::from(path),
                     thumbnail,
+                    candidate.is_stream,
                 ));
             }
             browsing.set(false);
         });
     });
-
-    let only_streams =
-        !candidates.read().is_empty() && candidates.read().iter().all(|c| c.is_stream);
 
     rsx! {
         div {
@@ -246,12 +248,6 @@ pub fn AutoPage(
                 }
             }
 
-            if only_streams {
-                div { class: "alert alert-warning text-sm",
-                    span { "Solo video in streaming (m3u8/mpd) rilevati: download non supportato — aggiornamento futuro" }
-                }
-            }
-
             div { class: "flex flex-col gap-2 max-h-52 overflow-y-auto pr-1",
                 for (i, candidate) in candidates.read().iter().cloned().enumerate() {
                     CandidateRow {
@@ -291,13 +287,17 @@ fn CandidateRow(
             class: "flex items-center gap-2 rounded-lg bg-base-100 px-3 py-1 text-xs shadow-sm",
             // Thumbnail quadrata (poster/og:image) o placeholder
             Thumb { url: candidate.thumbnail.clone() }
-            span {
-                class: if candidate.is_stream {
-                    "badge badge-warning badge-sm shrink-0"
-                } else {
-                    "badge badge-success badge-sm shrink-0"
-                },
-                if candidate.is_stream { "m3u8/mpd" } else { "media" }
+            if candidate.is_stream {
+                span {
+                    class: "badge badge-ghost badge-sm shrink-0",
+                    title: "HLS/DASH: convertito in MP4 via ffmpeg",
+                    "stream"
+                }
+            } else {
+                span {
+                    class: "badge badge-success badge-sm shrink-0",
+                    "media"
+                }
             }
             // Nome leggibile (tooltip = URL completo)
             span {
@@ -310,18 +310,11 @@ fn CandidateRow(
                 title: "{candidate.url}",
                 "{size_label}"
             }
-            if candidate.is_stream {
-                span {
-                    class: "badge badge-ghost badge-sm shrink-0",
-                    title: "Non scaricabile: aggiornamento futuro",
-                    "non supp."
-                }
-            } else {
-                button {
-                    class: "btn btn-xs btn-primary shrink-0",
-                    onclick: move |_| on_download.call(candidate_for_click.clone()),
-                    "Scarica"
-                }
+            // Gli stream ora sono scaricabili: ffmpeg remuxa in MP4
+            button {
+                class: "btn btn-xs btn-primary shrink-0",
+                onclick: move |_| on_download.call(candidate_for_click.clone()),
+                "Scarica"
             }
         }
     }

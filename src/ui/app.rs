@@ -1,4 +1,5 @@
 use crate::download::engine::spawn_download;
+use crate::download::hls::spawn_hls_download;
 use crate::download::types::*;
 use crate::referers::RefererStore;
 use dioxus::prelude::*;
@@ -34,6 +35,7 @@ fn launch_download(
     referer: Option<String>,
     dest: PathBuf,
     thumbnail: Option<String>,
+    is_hls: bool,
 ) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
@@ -47,8 +49,15 @@ fn launch_download(
         current: 0,
         total: 0,
         thumbnail,
+        is_hls,
     });
-    let ctl = spawn_download(id, url, referer.clone(), dest, tx);
+    // HLS: ffmpeg (sidecar) scarica i segmenti e remuxa in MP4; engine normale
+    // altrimenti (range HTTP con pausa/ripresa)
+    let ctl = if is_hls {
+        spawn_hls_download(id, url, referer.clone(), dest, tx)
+    } else {
+        spawn_download(id, url, referer.clone(), dest, tx)
+    };
     // Referer preferiti: dedup + move-to-front, poi persistenza JSON.
     // Un errore di salvataggio NON blocca il download (lista resta in memoria).
     if let Some(r) = &referer {
@@ -100,19 +109,25 @@ pub fn App() -> Element {
 
     // Chiusure submit: cloni tx per consumer (le props vogliono FnMut)
     let tx_auto = tx.clone();
-    let auto_on_download =
-        move |(url, referer, dest, thumbnail): (String, Option<String>, PathBuf, Option<String>)| {
-            launch_download(
-                tx_auto.clone(),
-                downloads,
-                controls,
-                referer_store,
-                url,
-                referer,
-                dest,
-                thumbnail,
-            );
-        };
+    let auto_on_download = move |(
+        url,
+        referer,
+        dest,
+        thumbnail,
+        is_stream,
+    ): (String, Option<String>, PathBuf, Option<String>, bool)| {
+        launch_download(
+            tx_auto.clone(),
+            downloads,
+            controls,
+            referer_store,
+            url,
+            referer,
+            dest,
+            thumbnail,
+            is_stream,
+        );
+    };
     let tx_manual = tx.clone();
     let manual_on_submit = move |(url, referer, dest): (String, Option<String>, PathBuf)| {
         launch_download(
@@ -124,6 +139,7 @@ pub fn App() -> Element {
             referer,
             dest,
             None, // download manuale: nessuna thumbnail
+            false,
         );
         dialog_open.set(false);
     };
