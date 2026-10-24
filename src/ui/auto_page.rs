@@ -32,6 +32,8 @@ pub fn AutoPage(
     let page_url = use_signal(String::new);
     let page_title = use_signal(String::new);
     let load_error = use_signal(|| Option::<String>::None);
+    // Vero da "Vai" fino a NavigationCompleted (Title) o errore: feedback processo in corso
+    let loading = use_signal(|| false);
 
     let url_ok = reqwest::Url::parse(address.read().trim()).is_ok();
 
@@ -47,6 +49,7 @@ pub fn AutoPage(
                 page_url,
                 page_title,
                 load_error,
+                loading,
                 on_error,
             );
         }
@@ -60,6 +63,7 @@ pub fn AutoPage(
         page_url,
         page_title,
         load_error,
+        loading,
         on_error,
     );
     let go = move |_| {
@@ -142,6 +146,7 @@ pub fn AutoPage(
                             page_url,
                             page_title,
                             load_error,
+                            loading,
                             on_error,
                         );
                         move |e| {
@@ -172,9 +177,13 @@ pub fn AutoPage(
                 div { class: "alert alert-error text-sm", span { "{err}" } }
             }
 
-            // Stato pagina: titolo + URL correnti (info mentre il browser è nascosto)
-            div { class: "text-sm text-base-content/60 truncate",
-                if page_title.read().trim().is_empty() {
+            // Stato pagina: spinner durante la navigazione, poi titolo + URL
+            // correnti (info mentre il browser è nascosto)
+            div { class: "text-sm text-base-content/60 truncate flex items-center gap-2",
+                if *loading.read() {
+                    span { class: "loading loading-spinner loading-xs", aria_label: "Caricamento in corso" }
+                    span { "Caricamento pagina…" }
+                } else if page_title.read().trim().is_empty() {
                     "Nessuna pagina caricata"
                 } else {
                     "{page_title} — {page_url}"
@@ -191,7 +200,7 @@ pub fn AutoPage(
                 for (i, candidate) in candidates.read().iter().cloned().enumerate() {
                     { candidate_row(i, candidate, start_download.clone()) }
                 }
-                if candidates.read().is_empty() && load_error.read().is_none() {
+                if candidates.read().is_empty() && load_error.read().is_none() && !*loading.read() {
                     div { class: "text-sm text-base-content/50",
                         "Incolla l'URL di una pagina con un video: i media rilevati appaiono qui. Il browser gira in background: attendi qualche secondo affinché i player carichino i media."
                     }
@@ -262,6 +271,7 @@ type InitState = (
     Signal<String>,
     Signal<String>,
     Signal<Option<String>>,
+    Signal<bool>,
     EventHandler<String>,
 );
 
@@ -272,12 +282,13 @@ fn navigate(
     browser_state: &Rc<RefCell<Option<browser::BrowserHandle>>>,
     init: &InitState,
 ) {
-    let (initialized, address, candidates, page_url, page_title, load_error, on_error) = init;
+    let (initialized, address, candidates, page_url, page_title, load_error, loading, on_error) = init;
     // Copie dei Signal: set/write vogliono binding mut (KB dioxus)
     let address = *address;
     let mut candidates = *candidates;
     let mut page_title = *page_title;
     let mut load_error = *load_error;
+    let mut loading = *loading;
     if browser_state.borrow().is_none() {
         if initialized.get() {
             eprintln!("[auto] ATTENZIONE: init segnato done ma handle assente — reinizo");
@@ -291,6 +302,7 @@ fn navigate(
             *page_url,
             page_title,
             load_error,
+            loading,
             *on_error,
         );
     }
@@ -300,7 +312,9 @@ fn navigate(
     }
     load_error.set(None);
     candidates.write().clear();
-    page_title.set(String::new());    match browser_state.borrow().as_ref() {
+    page_title.set(String::new());
+    loading.set(true);
+    match browser_state.borrow().as_ref() {
         Some(handle) => {
             eprintln!("[auto] navigate: {url}");
             handle.navigate(&url);
@@ -319,6 +333,7 @@ fn init_browser(
     mut page_url: Signal<String>,
     mut page_title: Signal<String>,
     mut load_error: Signal<Option<String>>,
+    mut loading: Signal<bool>,
     on_error: EventHandler<String>,
 ) {
     let dx = dioxus::desktop::window();
@@ -373,11 +388,15 @@ fn init_browser(
                 }
                 browser::BrowserEvent::Title(title) => {
                     eprintln!("[auto] titolo ricevuto: {title}");
-                    page_title.set(title)
+                    page_title.set(title);
+                    // NavigationCompleted: la pagina è caricata, lo spinner può
+                    // sparire anche se il titolo è vuoto
+                    loading.set(false);
                 }
                 browser::BrowserEvent::Error(msg) => {
                     eprintln!("[auto] ERRORE browser: {msg}");
                     load_error.set(Some(msg.clone()));
+                    loading.set(false);
                     on_error.call(msg);
                 }
             }
