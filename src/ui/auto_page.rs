@@ -173,6 +173,24 @@ pub fn AutoPage(
                             );
                         }
                     },
+                    // Tasto destro: incolla dagli appunti sostituendo il campo
+                    // (il menu di default viene soppresso solo qui)
+                    oncontextmenu: {
+                        let url_dirty = url_dirty.clone();
+                        move |e: Event<MouseData>| {
+                            e.prevent_default();
+                            e.stop_propagation();
+                            if let Ok(mut cb) = arboard::Clipboard::new()
+                                && let Ok(text) = cb.get_text()
+                            {
+                                let text = text.trim().to_string();
+                                if !text.is_empty() {
+                                    address.set(text);
+                                    clear_results(&url_dirty, candidates, page_url, page_title, load_error, loading, ad_wait);
+                                }
+                            }
+                        }
+                    },
                     // Qualsiasi modifica/cancellazione dell'URL invalida i
                     // risultati della pagina precedente
                     oninput: {
