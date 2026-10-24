@@ -129,7 +129,7 @@ pub fn AutoPage(
 
     rsx! {
         div {
-            class: "flex flex-col gap-3",
+            class: "flex flex-col gap-3 mt-3",
 
             div { class: "flex gap-2",
                 button {
@@ -150,7 +150,7 @@ pub fn AutoPage(
                     "⟳"
                 }
                 input {
-                    class: "input input-sm w-full",
+                    class: "input input-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500",
                     r#type: "url",
                     placeholder: "https://esempio.com/pagina-con-video",
                     value: "{address}",
