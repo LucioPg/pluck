@@ -456,10 +456,14 @@ fn browser_thread(
     // Chiusura post-cattura: primo candidato (fuori finestra ad) → 3s di grazia
     // per raccogliere le varianti di qualità, poi TerminateProcess del browser.
     // Riazzerato a ogni nuovo candidato; disarmato mentre la pubblicità gira.
+    // ARM SOLO DOPO NavigationCompleted: i candidati preload di hls.js
+    // arrivano spesso prima del completamento — armare lì farebbe scadere il
+    // timer prima del Title (titolo/thumbnail persi).
     const CAPTURE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
     let capture_deadline = std::rc::Rc::new(std::cell::Cell::new(
         Option::<std::time::Instant>::None,
     ));
+    let nav_completed = std::rc::Rc::new(std::cell::Cell::new(false));
     let scout_tick_events = events.clone();
     let scout_tick_candidates = candidates.clone();
     let _ = webview.add_NavigationCompleted(
@@ -467,10 +471,14 @@ fn browser_thread(
             let scout_deadline = scout_deadline.clone();
             let scout_since = scout_since.clone();
             let ad_notified = ad_notified.clone();
+            let title_capture = capture_deadline.clone();
+            let title_nav_completed = nav_completed.clone();
             move |_webview, _args| {
             eprintln!("[browser] navigazione completata: estraggo titolo + attivo scout (20s)");
+            title_nav_completed.set(true);
             let title_events = title_events.clone();
             let page_thumb = title_page_thumb.clone();
+            let capture_for_title = title_capture.clone();
             let _ = scout_webview.ExecuteScript(
                 &HSTRING::from(TITLE_JS),
                 &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
@@ -490,6 +498,14 @@ fn browser_thread(
                         if !thumb.is_empty() {
                             *page_thumb.borrow_mut() = Some(thumb.clone());
                             let _ = title_events.send(BrowserEvent::PageThumb(thumb));
+                        }
+                        // Title/thumb arrivati: se la chiusura post-cattura è
+                        // armata, il timer riparte da qui (il Title non deve
+                        // morire per una corsa con i candidati preload)
+                        if capture_for_title.get().is_some() {
+                            capture_for_title.set(Some(
+                                std::time::Instant::now() + CAPTURE_GRACE,
+                            ));
                         }
                     }
                     Ok(())
@@ -543,6 +559,7 @@ fn browser_thread(
     let cdp_page_thumb = page_thumb.clone();
     let cdp_capture = capture_deadline.clone();
     let cdp_ad_active = ad_active_now.clone();
+    let cdp_nav_completed = nav_completed.clone();
     let _ = receiver.add_DevToolsProtocolEventReceived(
         &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
             move |_webview, args| {
@@ -577,8 +594,8 @@ fn browser_thread(
                                     let _ =
                                         cdp_events.send(BrowserEvent::Candidate(candidate));
                                     // Cattura → 3s di grazia poi chiusura
-                                    // (a meno che sia attiva una pubblicità)
-                                    if !cdp_ad_active.get() {
+                                    // (solo dopo NavigationCompleted e fuori ad)
+                                    if cdp_nav_completed.get() && !cdp_ad_active.get() {
                                         cdp_capture.set(Some(
                                             std::time::Instant::now() + CAPTURE_GRACE,
                                         ));
@@ -622,7 +639,7 @@ fn browser_thread(
                 return;
             }
             eprintln!("[browser] comando ricevuto");
-            exec(&controller, &webview, cmd, &page_thumb, &capture_deadline);
+            exec(&controller, &webview, cmd, &page_thumb, &capture_deadline, &nav_completed);
         }
         // Chiusura post-cattura: il link è in mano all'utente → silenzio totale
         // (TerminateProcess come all'uscita). Il canale si chiude e l'UI
@@ -663,6 +680,7 @@ fn browser_thread(
                 let ad_notified = ad_notified.clone();
                 let scout_capture = capture_deadline.clone();
                 let scout_ad_active = ad_active_now.clone();
+                let scout_nav_completed = nav_completed.clone();
                 let _ = webview.ExecuteScript(
                     &HSTRING::from(SCOUT_TICK_JS),
                     &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
@@ -743,7 +761,7 @@ fn browser_thread(
                             }
                             // Tick con nuovi candidati (fuori ad) → (ri)arma la
                             // chiusura post-cattura
-                            if !items.is_empty() {
+                            if !items.is_empty() && scout_nav_completed.get() {
                                 scout_capture.set(Some(
                                     std::time::Instant::now() + CAPTURE_GRACE,
                                 ));
@@ -810,6 +828,7 @@ fn exec(
     cmd: BrowserCommand,
     page_thumb: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     capture_deadline: &std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    nav_completed: &std::rc::Rc<std::cell::Cell<bool>>,
 ) {
     unsafe {
         match cmd {
@@ -818,16 +837,19 @@ fn exec(
                 // la cattura non è ancora avvenuta
                 page_thumb.borrow_mut().take();
                 capture_deadline.set(None);
+                nav_completed.set(false);
                 let _ = webview.Navigate(&HSTRING::from(url));
             }
             BrowserCommand::Back => {
                 page_thumb.borrow_mut().take();
                 capture_deadline.set(None);
+                nav_completed.set(false);
                 let _ = webview.GoBack();
             }
             BrowserCommand::Reload => {
                 page_thumb.borrow_mut().take();
                 capture_deadline.set(None);
+                nav_completed.set(false);
                 let _ = webview.Reload();
             }
             BrowserCommand::SetVisible(visible) => {
