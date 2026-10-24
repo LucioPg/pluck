@@ -462,6 +462,8 @@ fn init_browser(
     browser::register_shared_browser(&handle);
     *browser_state.borrow_mut() = Some(handle);
 
+    // Reset alla morte del thread browser (es. chiusura post-cattura)
+    let browser_state_cleanup = browser_state.clone();
     spawn(async move {
         while let Some(ev) = event_rx.recv().await {
             // URL modificato dall'utente dopo l'ultima navigazione: tutto ciò
@@ -550,6 +552,11 @@ fn init_browser(
                 }
             }
         }
-        eprintln!("[auto] canale eventi chiuso (thread browser terminato?)");
+        eprintln!("[auto] canale eventi chiuso (browser terminato?)");
+        // Browser morto (chiusura post-cattura): reset completo — il prossimo
+        // "Vai" re-inizializza il browser (spinner a copertura dell'attesa)
+        *browser_state_cleanup.borrow_mut() = None;
+        loading.set(false);
+        ad_wait.set(false);
     });
 }

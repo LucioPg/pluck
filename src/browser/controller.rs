@@ -358,6 +358,15 @@ fn browser_thread(
     };
     eprintln!("[browser] CoreWebView2 pronto");
 
+    // Mute a livello browser: il player NON può smutarsi da JS (vale anche per
+    // le pubblicità). Scout ri-forza video.muted a ogni tick come cintura.
+    if let Ok(wv15) = webview.cast::<ICoreWebView2_15>() {
+        let _ = wv15.SetIsMuted(true);
+        eprintln!("[browser] webview muta (ICoreWebView2_15)");
+    } else {
+        eprintln!("[browser] ATTENZIONE: ICoreWebView2_15 assente, niente mute globale");
+    }
+
     // Pid del processo browser: serve allo shutdown (TerminateProcess veloce —
     // il Close() graceful richiede secondi di teardown e tiene il lock sul
     // profilo, bloccando la cancellazione privacy all'uscita)
@@ -441,6 +450,16 @@ fn browser_thread(
     // AdWait(true) già inviato all'UI per questa finestra: evita un evento a
     // ogni tick mentre la pubblicità gira
     let ad_notified = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Stato ad corrente lato Rust (ultimo tick scout): i candidati CDP che
+    // arrivano fuori dai tick lo leggono per decidere se armare lo shutdown
+    let ad_active_now = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Chiusura post-cattura: primo candidato (fuori finestra ad) → 3s di grazia
+    // per raccogliere le varianti di qualità, poi TerminateProcess del browser.
+    // Riazzerato a ogni nuovo candidato; disarmato mentre la pubblicità gira.
+    const CAPTURE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+    let capture_deadline = std::rc::Rc::new(std::cell::Cell::new(
+        Option::<std::time::Instant>::None,
+    ));
     let scout_tick_events = events.clone();
     let scout_tick_candidates = candidates.clone();
     let _ = webview.add_NavigationCompleted(
@@ -519,52 +538,61 @@ fn browser_thread(
         webview.GetDevToolsProtocolEventReceiver(&HSTRING::from("Network.responseReceived"))
     {
         eprintln!("[browser] receiver Network.responseReceived registrato");
-        let cdp_events = events.clone();
-        let cdp_candidates = candidates.clone();
-        let cdp_page_thumb = page_thumb.clone();
-        let _ = receiver.add_DevToolsProtocolEventReceived(
-            &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
-                move |_webview, args| {
-                    if let Some(args) = args {
-                        let mut json = PWSTR::null();
-                        if args.ParameterObjectAsJson(&mut json).is_ok() {
-                            let json = take_pwstr(json);
-                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                                if verbose_logs()
-                                    && let Some(url) =
-                                        value["response"]["url"].as_str().map(|u| {
-                                            u.chars().take(140).collect::<String>()
-                                        })
+    let cdp_events = events.clone();
+    let cdp_candidates = candidates.clone();
+    let cdp_page_thumb = page_thumb.clone();
+    let cdp_capture = capture_deadline.clone();
+    let cdp_ad_active = ad_active_now.clone();
+    let _ = receiver.add_DevToolsProtocolEventReceived(
+        &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
+            move |_webview, args| {
+                if let Some(args) = args {
+                    let mut json = PWSTR::null();
+                    if args.ParameterObjectAsJson(&mut json).is_ok() {
+                        let json = take_pwstr(json);
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                            if verbose_logs()
+                                && let Some(url) =
+                                    value["response"]["url"].as_str().map(|u| {
+                                        u.chars().take(140).collect::<String>()
+                                    })
+                            {
+                                eprintln!("[browser] CDP response: {url}");
+                            }
+                            if let Some(mut candidate) =
+                                candidate_from_response_received(&value)
+                            {
+                                // I candidati CDP non hanno contesto DOM: la
+                                // thumbnail di pagina è il fallback migliore
+                                if candidate.thumbnail.is_none()
+                                    && let Some(t) = cdp_page_thumb.borrow().clone()
                                 {
-                                    eprintln!("[browser] CDP response: {url}");
+                                    candidate.thumbnail = Some(t);
                                 }
-                                if let Some(mut candidate) =
-                                    candidate_from_response_received(&value)
-                                {
-                                    // I candidati CDP non hanno contesto DOM: la
-                                    // thumbnail di pagina è il fallback migliore
-                                    if candidate.thumbnail.is_none()
-                                        && let Some(t) = cdp_page_thumb.borrow().clone()
-                                    {
-                                        candidate.thumbnail = Some(t);
-                                    }
-                                    if cdp_candidates.borrow_mut().insert(&candidate) {
-                                        eprintln!(
-                                            "[browser] candidato: {} (stream={})",
-                                            candidate.url, candidate.is_stream
-                                        );
-                                        let _ =
-                                            cdp_events.send(BrowserEvent::Candidate(candidate));
+                                if cdp_candidates.borrow_mut().insert(&candidate) {
+                                    eprintln!(
+                                        "[browser] candidato: {} (stream={})",
+                                        candidate.url, candidate.is_stream
+                                    );
+                                    let _ =
+                                        cdp_events.send(BrowserEvent::Candidate(candidate));
+                                    // Cattura → 3s di grazia poi chiusura
+                                    // (a meno che sia attiva una pubblicità)
+                                    if !cdp_ad_active.get() {
+                                        cdp_capture.set(Some(
+                                            std::time::Instant::now() + CAPTURE_GRACE,
+                                        ));
                                     }
                                 }
                             }
                         }
                     }
-                    Ok(())
-                },
-            )),
-            &mut 0,
-        );
+                }
+                Ok(())
+            },
+        )),
+        &mut 0,
+    );
     } else {
         eprintln!("[browser] ERRORE: GetDevToolsProtocolEventReceiver fallita");
     }
@@ -594,7 +622,23 @@ fn browser_thread(
                 return;
             }
             eprintln!("[browser] comando ricevuto");
-            exec(&controller, &webview, cmd, &page_thumb);
+            exec(&controller, &webview, cmd, &page_thumb, &capture_deadline);
+        }
+        // Chiusura post-cattura: il link è in mano all'utente → silenzio totale
+        // (TerminateProcess come all'uscita). Il canale si chiude e l'UI
+        // resetta lo stato browser (il prossimo "Vai" re-inizializza).
+        if let Some(cap) = capture_deadline.get()
+            && std::time::Instant::now() >= cap
+        {
+            capture_deadline.set(None);
+            eprintln!("[browser] cattura completa: chiudo il browser (pid={browser_pid})");
+            if browser_pid != 0
+                && let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, browser_pid)
+            {
+                let _ = TerminateProcess(h, 1);
+                let _ = CloseHandle(h);
+            }
+            return;
         }
         // Scout DOM a tick (spec §5): ogni 1s fino a 20s dal load, ExecuteScript
         // ISTANTANEO che ritorna i nuovi URL trovati nel DOM live
@@ -617,6 +661,8 @@ fn browser_thread(
                 let scout_deadline = scout_deadline.clone();
                 let scout_since = scout_since.clone();
                 let ad_notified = ad_notified.clone();
+                let scout_capture = capture_deadline.clone();
+                let scout_ad_active = ad_active_now.clone();
                 let _ = webview.ExecuteScript(
                     &HSTRING::from(SCOUT_TICK_JS),
                     &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
@@ -639,7 +685,7 @@ fn browser_thread(
                         else {
                             return Ok(());
                         };
-                        for item in items {
+                        for item in &items {
                             if let Some(url) = item["url"].as_str() {
                                 // Diagnostica: rifiuto del play() (autoplay negato)
                                 if let Some(err) = url.strip_prefix("__play_error__") {
@@ -667,8 +713,11 @@ fn browser_thread(
                             }
                         }
                         // Pubblicità attiva: estendi la finestra scout (cap 90s
-                        // dalla navigazione) e segnala all'UI il tentativo in corso
+                        // dalla navigazione) e segnala all'UI il tentativo in
+                        // corso. Mentre l'ad gira: niente chiusura post-cattura
                         if parsed["ad_active"].as_bool().unwrap_or(false) {
+                            scout_ad_active.set(true);
+                            scout_capture.set(None);
                             let within_cap = scout_since
                                 .get()
                                 .is_some_and(|t| {
@@ -685,10 +734,20 @@ fn browser_thread(
                                     let _ = scout_events.send(BrowserEvent::AdWait(true));
                                 }
                             }
-                        } else if ad_notified.replace(false) {
-                            // Ad finita: la finestra resta per il tempo residuo,
-                            // la segnalazione UI si spegne
-                            let _ = scout_events.send(BrowserEvent::AdWait(false));
+                        } else {
+                            scout_ad_active.set(false);
+                            if ad_notified.replace(false) {
+                                // Ad finita: la finestra resta per il tempo residuo,
+                                // la segnalazione UI si spegne
+                                let _ = scout_events.send(BrowserEvent::AdWait(false));
+                            }
+                            // Tick con nuovi candidati (fuori ad) → (ri)arma la
+                            // chiusura post-cattura
+                            if !items.is_empty() {
+                                scout_capture.set(Some(
+                                    std::time::Instant::now() + CAPTURE_GRACE,
+                                ));
+                            }
                         }
                         Ok(())
                     })),
@@ -750,20 +809,25 @@ fn exec(
     webview: &ICoreWebView2,
     cmd: BrowserCommand,
     page_thumb: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
+    capture_deadline: &std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>>,
 ) {
     unsafe {
         match cmd {
             BrowserCommand::Navigate(url) => {
-                // Nuova pagina: la thumbnail di pagina precedente è stantia
+                // Nuova pagina: la thumbnail di pagina precedente è stantia e
+                // la cattura non è ancora avvenuta
                 page_thumb.borrow_mut().take();
+                capture_deadline.set(None);
                 let _ = webview.Navigate(&HSTRING::from(url));
             }
             BrowserCommand::Back => {
                 page_thumb.borrow_mut().take();
+                capture_deadline.set(None);
                 let _ = webview.GoBack();
             }
             BrowserCommand::Reload => {
                 page_thumb.borrow_mut().take();
+                capture_deadline.set(None);
                 let _ = webview.Reload();
             }
             BrowserCommand::SetVisible(visible) => {
