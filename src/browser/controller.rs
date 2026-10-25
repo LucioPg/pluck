@@ -464,6 +464,10 @@ fn browser_thread(
         Option::<std::time::Instant>::None,
     ));
     let nav_completed = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Titolo non ancora trovato: con la pubblicità il primo TITLE_JS (a
+    // NavigationCompleted) spesso ritorna vuoto (overlay ad nel DOM) — i tick
+    // scout riprovano a ogni secondo finché il titolo non esiste
+    let title_sent = std::rc::Rc::new(std::cell::Cell::new(false));
     let scout_tick_events = events.clone();
     let scout_tick_candidates = candidates.clone();
     let _ = webview.add_NavigationCompleted(
@@ -490,9 +494,16 @@ fn browser_thread(
                     };
                     // TITLE_JS ritorna {t: titolo, th: thumbnail di pagina}
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                        if let Some(title) = v["t"].as_str() {
-                            eprintln!("[browser] titolo: {title}");
-                            let _ = title_events.send(BrowserEvent::Title(title.to_string()));
+                        match v["t"].as_str() {
+                            Some(title) => {
+                                eprintln!("[browser] titolo: {title}");
+                                let _ =
+                                    title_events.send(BrowserEvent::Title(title.to_string()));
+                            }
+                            None => eprintln!(
+                                "[browser] TITLE_JS: campo t assente, payload={:.200}",
+                                payload
+                            ),
                         }
                         let thumb = v["th"].as_str().unwrap_or("").trim().to_string();
                         if !thumb.is_empty() {
@@ -639,7 +650,7 @@ fn browser_thread(
                 return;
             }
             eprintln!("[browser] comando ricevuto");
-            exec(&controller, &webview, cmd, &page_thumb, &capture_deadline, &nav_completed);
+            exec(&controller, &webview, cmd, &page_thumb, &capture_deadline, &nav_completed, &title_sent);
         }
         // Chiusura post-cattura: il link è in mano all'utente → silenzio totale
         // (TerminateProcess come all'uscita). Il canale si chiude e l'UI
@@ -681,6 +692,8 @@ fn browser_thread(
                 let scout_capture = capture_deadline.clone();
                 let scout_ad_active = ad_active_now.clone();
                 let scout_nav_completed = nav_completed.clone();
+                let scout_title_sent = title_sent.clone();
+                let tick_webview = webview.clone();
                 let _ = webview.ExecuteScript(
                     &HSTRING::from(SCOUT_TICK_JS),
                     &ExecuteScriptCompletedHandler::create(Box::new(move |error_code, json| {
@@ -767,6 +780,44 @@ fn browser_thread(
                                 ));
                             }
                         }
+                        // Titolo ancora assente (ad in corso): riprova a ogni
+                        // tick finché la pagina ne espone uno
+                        if !scout_title_sent.get() {
+                            let ev = scout_events.clone();
+                            let sent = scout_title_sent.clone();
+                            let _ = tick_webview.ExecuteScript(
+                                &HSTRING::from(TITLE_JS),
+                                &ExecuteScriptCompletedHandler::create(Box::new(
+                                    move |error_code, json| {
+                                        if error_code.is_err() {
+                                            return Ok(());
+                                        }
+                                        let Ok(payload) =
+                                            serde_json::from_str::<String>(&json)
+                                        else {
+                                            return Ok(());
+                                        };
+                                        let Ok(v) =
+                                            serde_json::from_str::<serde_json::Value>(&payload)
+                                        else {
+                                            return Ok(());
+                                        };
+                                        if let Some(title) = v["t"].as_str()
+                                            && !title.is_empty()
+                                        {
+                                            eprintln!(
+                                                "[browser] titolo (tick scout): {title}"
+                                            );
+                                            sent.set(true);
+                                            let _ = ev.send(BrowserEvent::Title(
+                                                title.to_string(),
+                                            ));
+                                        }
+                                        Ok(())
+                                    },
+                                )),
+                            );
+                        }
                         Ok(())
                     })),
                 );
@@ -829,6 +880,7 @@ fn exec(
     page_thumb: &std::rc::Rc<std::cell::RefCell<Option<String>>>,
     capture_deadline: &std::rc::Rc<std::cell::Cell<Option<std::time::Instant>>>,
     nav_completed: &std::rc::Rc<std::cell::Cell<bool>>,
+    title_sent: &std::rc::Rc<std::cell::Cell<bool>>,
 ) {
     unsafe {
         match cmd {
@@ -838,18 +890,21 @@ fn exec(
                 page_thumb.borrow_mut().take();
                 capture_deadline.set(None);
                 nav_completed.set(false);
+                title_sent.set(false);
                 let _ = webview.Navigate(&HSTRING::from(url));
             }
             BrowserCommand::Back => {
                 page_thumb.borrow_mut().take();
                 capture_deadline.set(None);
                 nav_completed.set(false);
+                title_sent.set(false);
                 let _ = webview.GoBack();
             }
             BrowserCommand::Reload => {
                 page_thumb.borrow_mut().take();
                 capture_deadline.set(None);
                 nav_completed.set(false);
+                title_sent.set(false);
                 let _ = webview.Reload();
             }
             BrowserCommand::SetVisible(visible) => {
