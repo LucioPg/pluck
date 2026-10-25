@@ -263,7 +263,7 @@ fn browser_thread(
     options.set_language("en-US".into());
     // Autoplay senza user gesture: i player HLS (hls.js) avviano il load dei
     // segmenti solo dopo un play() che nell'WebView2 invisibile viene negato
-    // (preload assente → zero fetch → zero eventi CDP, caso example.com)
+    // (preload assente → zero fetch → zero eventi CDP, caso siti tube con player HLS)
     // + niente occlusion tracking: il browser sta dietro l'UI dell'app e
     // Chromium altrimenti lo tratterebbe come occluso → pagina "hidden" →
     // i player con visibility-gating non caricano mai (stesso sintomo)
@@ -340,7 +340,7 @@ fn browser_thread(
         }
     };
 
-    // Invisibile = document.hidden=true → i player tube-site (example.com)
+    // Invisibile = document.hidden=true → i player tube-site
     // gate-ano l'avvio HLS sulla visibilità e non caricano MAI il manifest.
     // Soluzione stealth: controller VISIBILE (pagina "visible", player parte)
     // ma gli HWND figli del browser finiscono in fondo allo Z-order, coperti
