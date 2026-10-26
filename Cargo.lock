@@ -2802,31 +2802,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "ldwhelper"
-version = "0.2.4"
-dependencies = [
- "arboard",
- "dioxus",
- "dirs",
- "ffmpeg-sidecar",
- "futures-util",
- "image",
- "m3u8-rs",
- "open",
- "percent-encoding",
- "reqwest",
- "rfd 0.15.4",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "webview2-com",
- "windows",
- "wiremock",
-]
-
-[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3864,6 +3839,31 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "pluck"
+version = "0.2.4"
+dependencies = [
+ "arboard",
+ "dioxus",
+ "dirs",
+ "ffmpeg-sidecar",
+ "futures-util",
+ "image",
+ "m3u8-rs",
+ "open",
+ "percent-encoding",
+ "reqwest",
+ "rfd 0.15.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "webview2-com",
+ "windows",
+ "wiremock",
+]
 
 [[package]]
 name = "png"

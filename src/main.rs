@@ -33,7 +33,7 @@ fn main() {
 fn run_ui() {
     let icon = load_window_icon();
     let mut builder = WindowBuilder::new()
-        .with_title("ldwhelper")
+        .with_title("pluck")
         .with_inner_size(dioxus::desktop::LogicalSize::new(820.0, 600.0))
         .with_resizable(true);
     if let Some(icon) = icon {

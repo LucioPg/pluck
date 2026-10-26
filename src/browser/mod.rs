@@ -258,7 +258,7 @@ pub fn profile_dir() -> PathBuf {
     let base = dirs::cache_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("ldwhelper").join("webview-profile")
+    base.join("pluck").join("webview-profile")
 }
 
 /// Shutdown del browser condiviso + cancellazione del profilo WebView2

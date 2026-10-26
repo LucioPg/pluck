@@ -24,7 +24,7 @@ impl RefererStore {
     /// Fallback `.` (CWD) se `dirs::data_dir()` è None (irraggiungibile su Windows).
     pub fn default_path() -> PathBuf {
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join("ldwhelper").join("referers.json")
+        base.join("pluck").join("referers.json")
     }
 
     pub fn load(path: PathBuf) -> Self {
@@ -139,7 +139,7 @@ mod dpapi {
         unsafe {
             CryptProtectData(
                 &input,
-                w!("ldwhelper referers"),
+                w!("pluck referers"),
                 None,
                 None,
                 None,

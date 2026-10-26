@@ -1,6 +1,6 @@
 //! Modalità headless da linea di comando. Nessun argomento → UI grafica.
 //!
-//! Sintassi: `ldwhelper <url> [referrer] [on|off]`. Spoofing attivo di default
+//! Sintassi: `pluck <url> [referrer] [on|off]`. Spoofing attivo di default
 //! (coerente con la UI): con spoofing `on` esplicito senza referrer → errore.
 
 use crate::browser::{extension_from_url, format_bytes, name_from_url, sanitize_filename};
@@ -32,23 +32,23 @@ pub enum CliAction {
 
 pub fn usage() -> String {
     "\
-ldwhelper — download manager
+pluck — download manager
 
 Usage:
-  ldwhelper                             Launch the graphical UI
-  ldwhelper <url> [referrer] [spoofing] Direct download (no UI)
-  ldwhelper <url> <spoofing>            No referrer: on|off only
+  pluck                             Launch the graphical UI
+  pluck <url> [referrer] [spoofing] Direct download (no UI)
+  pluck <url> <spoofing>            No referrer: on|off only
 
 Arguments:
-  url       URL of the file or playlist (.m3u8/.mpd → HLS via ffmpeg)
+  url       URL of the file or m3u8/mpd manifest (.m3u8/.mpd → HLS via ffmpeg)
   referrer  Referrer to send with the requests (optional)
   spoofing  on|off — sends the Referer header (default: on; on requires a referrer)
 
 Examples:
-  ldwhelper https://example.com/video.mp4
-  ldwhelper https://example.com/video.mp4 https://example.com/
-  ldwhelper https://example.com/video.mp4 https://example.com/ on
-  ldwhelper https://example.com/video.mp4 off
+  pluck https://example.com/video.mp4
+  pluck https://example.com/video.mp4 https://example.com/
+  pluck https://example.com/video.mp4 https://example.com/ on
+  pluck https://example.com/video.mp4 off
 "
     .to_string()
 }

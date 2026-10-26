@@ -155,7 +155,7 @@ pub fn App() -> Element {
         let menu = trayicon::menu::Menu::new();
         menu.append(&trayicon::menu::MenuItem::with_id(
             "open",
-            "Open ldwhelper",
+            "Open pluck",
             true,
             None,
         ))
@@ -193,7 +193,7 @@ pub fn App() -> Element {
         div { class: "h-screen overflow-hidden bg-base-100 p-6",
             div { class: "max-w-2xl mx-auto h-full flex flex-col gap-4",
                 header { class: "flex items-center justify-between gap-4",
-                    h1 { class: "text-2xl font-bold shrink-0", "ldwhelper v{env!(\"CARGO_PKG_VERSION\")}" }
+                    h1 { class: "text-2xl font-bold shrink-0", "pluck v{env!(\"CARGO_PKG_VERSION\")}" }
                     div { class: "flex items-center gap-3",
                         // Spoofing referrer: toggle ON/OFF globale (default ON,
                         // stessi identici modelli di PWDManager — toggle daisyUI)

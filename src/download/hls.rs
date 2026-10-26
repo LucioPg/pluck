@@ -281,7 +281,7 @@ fn ffmpeg_dir() -> PathBuf {
     dirs::cache_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(std::env::temp_dir)
-        .join("ldwhelper")
+        .join("pluck")
         .join("ffmpeg")
 }
 

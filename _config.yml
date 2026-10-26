@@ -1,4 +1,4 @@
-title: ldwhelper
+title: pluck
 description: Windows desktop helper that downloads media embedded in web pages — embedded WebView2 browser, HLS via ffmpeg, Rust + Dioxus.
 show_downloads: true
 google_site_verification: google6bfda6adb63f0f7c.html
