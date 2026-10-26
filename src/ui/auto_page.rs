@@ -19,6 +19,9 @@ pub type DownloadRequest = (String, Option<String>, PathBuf, Option<String>, boo
 
 #[component]
 pub fn AutoPage(
+    /// Spoofing referrer (radio nell'header): false → nessun Referer su
+    /// download e probe HEAD/manifest
+    spoofing: Signal<bool>,
     /// Chiamato al termine della save dialog
     on_download: EventHandler<DownloadRequest>,
     /// Toast errori (init WebView2, save dialog)
@@ -64,6 +67,7 @@ pub fn AutoPage(
                 load_error,
                 loading,
                 ad_wait,
+                spoofing,
                 dirty_init.clone(),
                 on_error,
             );
@@ -74,6 +78,7 @@ pub fn AutoPage(
     let dirty_go = url_dirty.clone();
     let init_go = (
         initialized.clone(),
+        spoofing,
         address,
         candidates,
         page_url,
@@ -96,7 +101,12 @@ pub fn AutoPage(
         browsing.set(true);
         let suggested = {
             let raw = if page_title.read().trim().is_empty() {
-                candidate.url.rsplit('/').next().unwrap_or("video").to_string()
+                candidate
+                    .url
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("video")
+                    .to_string()
             } else {
                 page_title.read().trim().to_string()
             };
@@ -106,7 +116,12 @@ pub fn AutoPage(
                 browser::extension_from_url(&candidate.url)
             )
         };
-        let referer = page_url.read().trim().to_string();
+        // Spoofing OFF → nessun Referer sul download
+        let referer = if *spoofing.read() {
+            page_url.read().trim().to_string()
+        } else {
+            String::new()
+        };
         let browsing = browsing.clone();
         spawn(async move {
             let dialog = rfd::AsyncFileDialog::new()
@@ -119,7 +134,11 @@ pub fn AutoPage(
                 let thumbnail = candidate.thumbnail.clone();
                 on_download((
                     candidate.url,
-                    if referer.is_empty() { None } else { Some(referer) },
+                    if referer.is_empty() {
+                        None
+                    } else {
+                        Some(referer)
+                    },
                     PathBuf::from(path),
                     thumbnail,
                     candidate.is_stream,
@@ -204,6 +223,7 @@ pub fn AutoPage(
                         let bs = browser_state.clone();
                         let init = (
                             initialized.clone(),
+                            spoofing,
                             address,
                             candidates,
                             page_url,
@@ -342,6 +362,7 @@ fn CandidateRow(
 /// Stato necessario all'init lazy, condiviso tra effect e navigate.
 type InitState = (
     Rc<Cell<bool>>,
+    Signal<bool>,
     Signal<String>,
     Signal<Vec<browser::MediaCandidate>>,
     Signal<String>,
@@ -382,7 +403,18 @@ fn navigate(
     init: &InitState,
     url_dirty: &Rc<Cell<bool>>,
 ) {
-    let (initialized, address, candidates, page_url, page_title, load_error, loading, ad_wait, on_error) = init;
+    let (
+        initialized,
+        spoofing,
+        address,
+        candidates,
+        page_url,
+        page_title,
+        load_error,
+        loading,
+        ad_wait,
+        on_error,
+    ) = init;
     // Copie dei Signal: set/write vogliono binding mut (KB dioxus)
     let address = *address;
     let mut candidates = *candidates;
@@ -405,6 +437,7 @@ fn navigate(
             load_error,
             loading,
             ad_wait,
+            *spoofing,
             url_dirty.clone(),
             *on_error,
         );
@@ -443,6 +476,7 @@ fn init_browser(
     mut load_error: Signal<Option<String>>,
     mut loading: Signal<bool>,
     mut ad_wait: Signal<bool>,
+    spoofing: Signal<bool>,
     url_dirty: Rc<Cell<bool>>,
     on_error: EventHandler<String>,
 ) {
@@ -473,7 +507,10 @@ fn init_browser(
             }
             match ev {
                 browser::BrowserEvent::Candidate(c) => {
-                    eprintln!("[auto] candidato ricevuto: {} (stream={})", c.url, c.is_stream);
+                    eprintln!(
+                        "[auto] candidato ricevuto: {} (stream={})",
+                        c.url, c.is_stream
+                    );
                     let mut list = candidates.write();
                     list.insert(0, c.clone());
                     list.truncate(200);
@@ -482,22 +519,32 @@ fn init_browser(
                     // stima da manifest per gli stream HLS (referer = pagina corrente);
                     // aggiorna la riga al termine
                     if c.size.is_none() && !c.is_stream {
-                        let referer = page_url.read().trim().to_string();
+                        // Spoofing OFF → probe senza Referer
+                        let referer = if *spoofing.read() {
+                            page_url.read().trim().to_string()
+                        } else {
+                            String::new()
+                        };
                         let mut candidates_updater = candidates;
                         spawn(async move {
-                            if let Some(size) =
-                                browser::probe_size(&c.url, Some(referer.as_str()).filter(|r| !r.is_empty())).await
+                            if let Some(size) = browser::probe_size(
+                                &c.url,
+                                Some(referer.as_str()).filter(|r| !r.is_empty()),
+                            )
+                            .await
                             {
                                 let mut list = candidates_updater.write();
-                                if let Some(item) =
-                                    list.iter_mut().find(|i| i.url == c.url)
-                                {
+                                if let Some(item) = list.iter_mut().find(|i| i.url == c.url) {
                                     item.size = Some(size);
                                 }
                             }
                         });
                     } else if c.is_stream {
-                        let referer = page_url.read().trim().to_string();
+                        let referer = if *spoofing.read() {
+                            page_url.read().trim().to_string()
+                        } else {
+                            String::new()
+                        };
                         let mut candidates_updater = candidates;
                         spawn(async move {
                             if let Some(size) = crate::download::hls::probe_hls_size(

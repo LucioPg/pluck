@@ -69,11 +69,13 @@ fn launch_download(
 
 #[component]
 pub fn App() -> Element {
-
     let mut downloads = use_signal(Vec::<DownloadItem>::new);
     let mut controls = use_signal(HashMap::<DownloadId, DownloadControl>::new);
     let mut dialog_open = use_signal(|| false);
     let toasts = use_signal(Vec::<String>::new);
+    // Spoofing referrer: invio dell'header Referer sui download/probe. Attivo di
+    // default (scelta punto 1 todo); il radio nell'header lo disattiva globalmente.
+    let mut spoofing = use_signal(|| true);
     // Referer preferiti: caricati una sola volta all'avvio da %APPDATA%/ldwhelper/referers.json
     let mut referer_store = use_signal(|| RefererStore::load(RefererStore::default_path()));
 
@@ -109,13 +111,13 @@ pub fn App() -> Element {
 
     // Chiusure submit: cloni tx per consumer (le props vogliono FnMut)
     let tx_auto = tx.clone();
-    let auto_on_download = move |(
-        url,
-        referer,
-        dest,
-        thumbnail,
-        is_stream,
-    ): (String, Option<String>, PathBuf, Option<String>, bool)| {
+    let auto_on_download = move |(url, referer, dest, thumbnail, is_stream): (
+        String,
+        Option<String>,
+        PathBuf,
+        Option<String>,
+        bool,
+    )| {
         launch_download(
             tx_auto.clone(),
             downloads,
@@ -199,10 +201,40 @@ pub fn App() -> Element {
             div { class: "max-w-2xl mx-auto h-full flex flex-col gap-4",
                 header { class: "flex items-center justify-between gap-4",
                     h1 { class: "text-2xl font-bold shrink-0", "ldwhelper v{env!(\"CARGO_PKG_VERSION\")}" }
-                    button {
-                        class: "btn btn-primary",
-                        onclick: move |_| dialog_open.set(true),
-                        "＋ Manuale"
+                    div { class: "flex items-center gap-3",
+                        // Spoofing referrer: ON/OFF globale (default ON)
+                        div {
+                            class: "flex items-center gap-2.5 rounded-full bg-base-200 px-3.5 py-1.5 shrink-0",
+                            title: "Spoofing referrer: invia l'header Referer con i download (sostituzione del referrer)",
+                            span { class: "text-xs font-semibold uppercase tracking-wide opacity-60", "Spoofing" }
+                            label { class: "flex cursor-pointer items-center gap-1.5 text-sm",
+                                input {
+                                    r#type: "radio",
+                                    name: "spoofing-referrer",
+                                    class: "radio radio-primary radio-xs",
+                                    checked: *spoofing.read(),
+                                    onclick: move |_| spoofing.set(true),
+                                    aria_label: "Spoofing referrer attivo",
+                                }
+                                "On"
+                            }
+                            label { class: "flex cursor-pointer items-center gap-1.5 text-sm",
+                                input {
+                                    r#type: "radio",
+                                    name: "spoofing-referrer",
+                                    class: "radio radio-primary radio-xs",
+                                    checked: !*spoofing.read(),
+                                    onclick: move |_| spoofing.set(false),
+                                    aria_label: "Spoofing referrer disattivato",
+                                }
+                                "Off"
+                            }
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            onclick: move |_| dialog_open.set(true),
+                            "＋ Manuale"
+                        }
                     }
                 }
 
@@ -210,6 +242,7 @@ pub fn App() -> Element {
                 // shrink-0 + max-h: non può mai sbordare sopra il pane download.
                 div { class: "shrink-0 max-h-[45vh] overflow-y-auto",
                     crate::ui::auto_page::AutoPage {
+                        spoofing,
                         on_download: auto_on_download,
                         on_error: move |msg: String| {
                             push_toast(toasts, msg);
@@ -237,6 +270,7 @@ pub fn App() -> Element {
             if *dialog_open.read() {
                 crate::ui::new_download_dialog::NewDownloadDialog {
                     open: dialog_open,
+                    spoofing,
                     referers: referer_store.read().list().to_vec(),
                     on_submit: manual_on_submit,
                     on_error: move |msg: String| {

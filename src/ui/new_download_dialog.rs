@@ -4,6 +4,9 @@ use std::path::PathBuf;
 #[component]
 pub fn NewDownloadDialog(
     mut open: Signal<bool>,
+    /// Spoofing referrer (radio nell'header): false → campo referer disabilitato,
+    /// nessun Referer sul download
+    spoofing: Signal<bool>,
     /// Referer preferiti salvati (per il dropdown)
     referers: Vec<String>,
     /// (url, referer, destinazione) — chiamato solo se validazione OK
@@ -30,6 +33,7 @@ pub fn NewDownloadDialog(
     let url_ok = reqwest::Url::parse(&url.read()).is_ok();
     let filename_ok = !filename.read().trim().is_empty();
     let can_start = url_ok && filename_ok;
+    let spoof_on = *spoofing.read();
 
     let browse = move |_| {
         // guard anti doppio-click: il disabled arriva solo al prossimo render
@@ -84,7 +88,13 @@ pub fn NewDownloadDialog(
                             r#type: "text",
                             placeholder: "https://esempio.com",
                             value: "{referer}",
+                            disabled: !spoof_on,
                             oninput: move |e| referer.set(e.value()),
+                        }
+                        if !spoof_on {
+                            p { class: "label text-base-content/60",
+                                "Spoofing disattivato: nessun Referer verrà inviato"
+                            }
                         }
                         div { class: "flex items-center gap-2 mt-2",
                             button {
@@ -167,7 +177,12 @@ pub fn NewDownloadDialog(
                         class: "btn btn-primary",
                         disabled: !can_start || *browsing.read(),
                         onclick: move |_| {
-                            let referer_val = referer.read().trim().to_string();
+                            // Spoofing OFF → il referer non viene inviato né salvato
+                            let referer_val = if spoof_on {
+                                referer.read().trim().to_string()
+                            } else {
+                                String::new()
+                            };
                             on_submit((
                                 url.read().clone(),
                                 if referer_val.is_empty() { None } else { Some(referer_val) },
