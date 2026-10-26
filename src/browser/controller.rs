@@ -545,8 +545,8 @@ fn browser_thread(
         // Sniffing CDP (spec §5). ATTENZIONE ALL'ORDINE: Network.enable deve essere
         // COMPLETATO prima di qualsiasi navigazione — le richieste della pagina
         // (incluso il fetch preload del <video>) altrimenti avvengono prima che il
-        // domain sia attivo e gli eventi non arrivano (bug osservato su example:
-        // completamento async arrivato dopo la fine del load).
+        // domain sia attivo e gli eventi non arrivano (bug osservato su un sito
+        // con player in iframe: completamento async arrivato dopo la fine del load).
         {
             let (tx, rx) = std::sync::mpsc::channel();
             let _ = webview.CallDevToolsProtocolMethod(
