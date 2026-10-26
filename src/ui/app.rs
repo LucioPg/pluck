@@ -238,6 +238,19 @@ pub fn App() -> Element {
                     }
                 }
 
+                // Banner persistente: file referer illeggibile/corrotto → l'utente
+                // sa DOVE intervenire; la persistenza resta disabilitata finché
+                // non lo corregge (mai sovrascritto automaticamente)
+                if let Some(reason) = referer_store.read().corrupted() {
+                    div { class: "alert alert-warning text-sm shrink-0",
+                        span { class: "shrink-0", "⚠" }
+                        span { class: "min-w-0 break-all",
+                            "File referer corrotto ({reason}) — salvataggio disabilitato. File: "
+                            span { class: "font-mono", "{referer_store.read().path().display()}" }
+                        }
+                    }
+                }
+
                 // Sezione automatica: browser in background + candidati (sempre visibile).
                 // shrink-0 + max-h: non può mai sbordare sopra il pane download.
                 div { class: "shrink-0 max-h-[45vh] overflow-y-auto",
