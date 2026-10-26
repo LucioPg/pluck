@@ -155,7 +155,7 @@ pub fn App() -> Element {
         let menu = trayicon::menu::Menu::new();
         menu.append(&trayicon::menu::MenuItem::with_id(
             "open",
-            "Apri ldwhelper",
+            "Open ldwhelper",
             true,
             None,
         ))
@@ -163,14 +163,14 @@ pub fn App() -> Element {
         menu.append(&trayicon::menu::PredefinedMenuItem::separator())
             .unwrap();
         menu.append(&trayicon::menu::MenuItem::with_id(
-            "quit", "Esci", true, None,
+            "quit", "Exit", true, None,
         ))
         .unwrap();
         let img =
-            image::load_from_memory(include_bytes!("../../assets/icon.ico")).expect("icona tray");
+            image::load_from_memory(include_bytes!("../../assets/icon.ico")).expect("tray icon");
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
-        let icon = trayicon::Icon::from_rgba(rgba.into_raw(), w, h).expect("icona tray rgba");
+        let icon = trayicon::Icon::from_rgba(rgba.into_raw(), w, h).expect("tray icon rgba");
         trayicon::init_tray_icon(menu, Some(icon));
     });
 

@@ -126,7 +126,7 @@ pub fn AutoPage(
         spawn(async move {
             let dialog = rfd::AsyncFileDialog::new()
                 .add_filter("MP4", &["mp4"])
-                .add_filter("Tutti i file", &["*"])
+                .add_filter("All files", &["*"])
                 .set_file_name(&suggested);
             if let Some(handle) = dialog.save_file().await
                 && let Some(path) = handle.path().to_str()
@@ -352,7 +352,7 @@ fn CandidateRow(
             button {
                 class: "btn btn-xs btn-primary shrink-0",
                 onclick: move |_| on_download.call(candidate_for_click.clone()),
-                "Scarica"
+                "Download"
             }
         }
     }
