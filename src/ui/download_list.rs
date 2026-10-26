@@ -27,7 +27,7 @@ pub fn DownloadList(
             }
             if downloads.read().is_empty() {
                 div { class: "m-auto rounded-box border border-dashed border-base-300 px-6 py-4 text-center text-sm opacity-60",
-                    "Nessun download. Usa il pulsante \"＋ Manuale\" per avviarne uno."
+                    "No downloads yet. Use the \"＋ Manual\" button to start one."
                 }
             }
         }
@@ -57,11 +57,11 @@ fn DownloadRow(
         let path = open_path.clone();
         spawn(async move {
             if !path.exists() {
-                on_open_failed.call("File non trovato sul disco".into());
+                on_open_failed.call("File not found on disk".into());
                 return;
             }
             if let Err(e) = open::that(&path) {
-                on_open_failed.call(format!("Apertura fallita: {e}"));
+                on_open_failed.call(format!("Failed to open: {e}"));
             }
         });
     };
@@ -75,20 +75,20 @@ fn DownloadRow(
 
     let badge = match &item.state {
         DownloadState::Completed => rsx! {
-            span { class: "badge badge-success shrink-0", "Completato" }
+            span { class: "badge badge-success shrink-0", "Completed" }
         },
         DownloadState::Failed(reason) => rsx! {
             span {
                 class: "badge badge-error shrink-0",
                 title: "{reason}",
-                "Errore"
+                "Failed"
             }
         },
         DownloadState::Cancelled => rsx! {
-            span { class: "badge badge-warning shrink-0", "Annullato" }
+            span { class: "badge badge-warning shrink-0", "Cancelled" }
         },
         DownloadState::Paused => rsx! {
-            span { class: "badge badge-ghost shrink-0", "In pausa" }
+            span { class: "badge badge-ghost shrink-0", "Paused" }
         },
         DownloadState::Downloading => rsx! {
             span { class: "badge badge-primary shrink-0",
@@ -118,7 +118,7 @@ fn DownloadRow(
             if indeterminate {
                 span {
                     class: "loading loading-spinner loading-primary shrink-0",
-                    title: "Dimensione sconosciuta (Content-Length assente)",
+                    title: "Unknown size (no Content-Length)",
                 }
             } else {
                 div {
@@ -153,7 +153,7 @@ fn DownloadRow(
                                 let _ = ctl.pause.send(true);
                             }
                         },
-                        "Pausa"
+                        "Pause"
                     }
                 }
                 if item.state == DownloadState::Paused {
@@ -164,7 +164,7 @@ fn DownloadRow(
                                 let _ = ctl.pause.send(false);
                             }
                         },
-                        "Riprendi"
+                        "Resume"
                     }
                 }
                 if !is_terminal {
@@ -175,7 +175,7 @@ fn DownloadRow(
                                 ctl.cancel.cancel();
                             }
                         },
-                        "Annulla"
+                        "Cancel"
                     }
                 }
             }

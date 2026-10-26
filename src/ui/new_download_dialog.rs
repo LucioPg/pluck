@@ -66,34 +66,34 @@ pub fn NewDownloadDialog(
     rsx! {
         div { class: "modal modal-open",
             div { class: "modal-box",
-                h3 { class: "font-bold text-lg mb-4", "Nuovo download" }
+                h3 { class: "font-bold text-lg mb-4", "New download" }
                 div { class: "flex flex-col gap-3",
                     fieldset { class: "fieldset",
                         legend { class: "fieldset-legend", "URL" }
                         input {
                             class: "input w-full",
                             r#type: "url",
-                            placeholder: "https://esempio.com/file.mp4",
+                            placeholder: "https://example.com/file.mp4",
                             value: "{url}",
                             oninput: move |e| url.set(e.value()),
                         }
                         if !url.read().is_empty() && !url_ok {
-                            p { class: "label text-error", "URL non valido" }
+                            p { class: "label text-error", "Invalid URL" }
                         }
                     }
                     fieldset { class: "fieldset",
-                        legend { class: "fieldset-legend", "Referer (opzionale)" }
+                        legend { class: "fieldset-legend", "Referer (optional)" }
                         input {
                             class: "input w-full",
                             r#type: "text",
-                            placeholder: "https://esempio.com",
+                            placeholder: "https://example.com",
                             value: "{referer}",
                             disabled: !spoof_on,
                             oninput: move |e| referer.set(e.value()),
                         }
                         if !spoof_on {
                             p { class: "label text-base-content/60",
-                                "Spoofing disattivato: nessun Referer verrà inviato"
+                                "Spoofing off: no Referer will be sent"
                             }
                         }
                         div { class: "flex items-center gap-2 mt-2",
@@ -105,7 +105,7 @@ pub fn NewDownloadDialog(
                                         on_save_referer(r);
                                     }
                                 },
-                                "Salva referer"
+                                "Save referer"
                             }
                             if !referers.is_empty() {
                                 div {
@@ -119,7 +119,7 @@ pub fn NewDownloadDialog(
                                         role: "button",
                                         class: "btn btn-xs",
                                         onclick: move |_| dropdown_open.set(true),
-                                        "Referer salvati ({referers.len()}) ▾"
+                                        "Saved referers ({referers.len()}) ▾"
                                     }
                                     // Niente classe `menu` DaisyUI: le sue regole
                                     // (flex-flow column wrap + display grid sui
@@ -141,7 +141,7 @@ pub fn NewDownloadDialog(
                                                 }
                                                 button {
                                                     class: "btn btn-ghost btn-xs shrink-0",
-                                                    aria_label: "Elimina referer",
+                                                    aria_label: "Delete referer",
                                                     onclick: move |_| on_remove_referer(r_del.clone()),
                                                     "✕"
                                                 }
@@ -158,7 +158,7 @@ pub fn NewDownloadDialog(
                             input {
                                 class: "input w-full",
                                 r#type: "text",
-                                placeholder: "C:\\percorso\\file.mp4",
+                                placeholder: "C:\\path\\file.mp4",
                                 value: "{filename}",
                                 oninput: move |e| filename.set(e.value()),
                             }
@@ -167,16 +167,16 @@ pub fn NewDownloadDialog(
                                 disabled: *browsing.read(),
                                 onclick: browse,
                                 if *browsing.read() { span { class: "loading loading-spinner loading-xs" } }
-                                "Sfoglia…"
+                                "Browse…"
                             }
                         }
                         if !filename_ok {
-                            p { class: "label text-error", "Scegli un file di destinazione" }
+                            p { class: "label text-error", "Choose a destination file" }
                         }
                     }
                 }
                 div { class: "modal-action",
-                    button { class: "btn", onclick: move |_| open.set(false), "Annulla" }
+                    button { class: "btn", onclick: move |_| open.set(false), "Cancel" }
                     button {
                         class: "btn btn-primary",
                         disabled: !can_start || *browsing.read(),
@@ -196,7 +196,7 @@ pub fn NewDownloadDialog(
                             referer.set(String::new());
                             filename.set(String::new());
                         },
-                        "Avvia"
+                        "Start"
                     }
                 }
             }

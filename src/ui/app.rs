@@ -212,7 +212,7 @@ pub fn App() -> Element {
                         button {
                             class: "btn btn-primary",
                             onclick: move |_| dialog_open.set(true),
-                            "＋ Manuale"
+                            "＋ Manual"
                         }
                     }
                 }
@@ -224,7 +224,7 @@ pub fn App() -> Element {
                     div { class: "alert alert-warning text-sm shrink-0",
                         span { class: "shrink-0", "⚠" }
                         span { class: "min-w-0 break-all",
-                            "File referer corrotto ({reason}) — salvataggio disabilitato. File: "
+                            "Corrupted referer file ({reason}) — saving disabled. File: "
                             span { class: "font-mono", "{referer_store.read().path().display()}" }
                         }
                     }

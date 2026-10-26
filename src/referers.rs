@@ -38,7 +38,7 @@ impl RefererStore {
             Err(e) => Self {
                 path,
                 entries: Vec::new(),
-                corrupted: Some(format!("lettura fallita: {e}")),
+                corrupted: Some(format!("read failed: {e}")),
             },
             Ok(bytes) => {
                 // Plaintext legacy prima (compat), poi blob DPAPI
@@ -48,9 +48,9 @@ impl RefererStore {
                         dpapi::unprotect(&bytes)
                             .and_then(|plain| {
                                 serde_json::from_slice::<Vec<String>>(&plain)
-                                    .map_err(|e| format!("blob decifrato non è JSON valido: {e}"))
+                                    .map_err(|e| format!("decrypted blob is not valid JSON: {e}"))
                             })
-                            .map_err(|e| format!("decifrazione DPAPI: {e}"))
+                            .map_err(|e| format!("DPAPI decryption: {e}"))
                     });
                 match parsed {
                     Ok(entries) => Self {
@@ -109,7 +109,7 @@ impl RefererStore {
     pub fn save(&self) -> Result<(), String> {
         if let Some(reason) = &self.corrupted {
             return Err(format!(
-                "file referer corrotto, salvataggio disabilitato ({reason})"
+                "corrupted referer file, saving disabled ({reason})"
             ));
         }
         let json = serde_json::to_vec(&self.entries).map_err(|e| format!("serialize: {e}"))?;

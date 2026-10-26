@@ -62,7 +62,7 @@ async fn run_download(
                         .send(ProgressMessage {
                             id,
                             state: Some(DownloadState::Failed(
-                                "Connessione persa, recovery fallita".into(),
+                                "Connection lost, recovery failed".into(),
                             )),
                             current: newer,
                             total: 0,
@@ -77,7 +77,7 @@ async fn run_download(
                 .send(ProgressMessage {
                     id,
                     state: Some(DownloadState::Failed(
-                        "Connessione persa o URL non raggiungibile".into(),
+                        "Connection lost or URL unreachable".into(),
                     )),
                     current: 0,
                     total: 0,
@@ -242,7 +242,7 @@ async fn attempt(
             let _ = tx
                 .send(ProgressMessage {
                     id: *id,
-                    state: Some(DownloadState::Failed(format!("Errore apertura file: {e}"))),
+                    state: Some(DownloadState::Failed(format!("File open error: {e}"))),
                     current,
                     total,
                 })
@@ -294,7 +294,7 @@ async fn attempt(
                         if let Err(e) = file.write_all(&bytes).await {
                             let _ = tx.send(ProgressMessage {
                                 id: *id,
-                                state: Some(DownloadState::Failed(format!("Errore scrittura: {e}"))),
+                                state: Some(DownloadState::Failed(format!("Write error: {e}"))),
                                 current,
                                 total,
                             }).await;

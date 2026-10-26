@@ -155,8 +155,8 @@ pub fn AutoPage(
             div { class: "flex gap-2",
                 button {
                     class: "btn btn-sm",
-                    aria_label: "Ricarica pagina",
-                    title: "Ricarica: riavvia anche lo sniffing dei media",
+                    aria_label: "Reload page",
+                    title: "Reload: also restarts media sniffing",
                     onclick: {
                         let bs = browser_state.clone();
                         let mut aw = ad_wait;
@@ -174,7 +174,7 @@ pub fn AutoPage(
                     class: "input input-sm w-full focus:outline-none focus:ring-2 focus:ring-teal-500",
                     r#type: "url",
                     id: "url-input",
-                    placeholder: "https://esempio.com/pagina-con-video",
+                    placeholder: "https://example.com/page-with-video",
                     value: "{address}",
                     // Riacquisizione del focus su campo pieno: i risultati
                     // vengono svuotati (come il tasto ✕, ma l'URL resta) e il
@@ -243,8 +243,8 @@ pub fn AutoPage(
                 }
                 button {
                     class: "btn btn-sm btn-ghost",
-                    aria_label: "Cancella indirizzo",
-                    title: "Cancella il campo indirizzo",
+                    aria_label: "Clear address",
+                    title: "Clear the address field",
                     onclick: {
                         let url_dirty = url_dirty.clone();
                         move |_| {
@@ -258,7 +258,7 @@ pub fn AutoPage(
                     class: "btn btn-sm btn-primary",
                     disabled: address.read().trim().is_empty() || !url_ok,
                     onclick: go,
-                    "Vai"
+                    "Go"
                 }
             }
 
@@ -271,16 +271,16 @@ pub fn AutoPage(
             // dedicato anche a load finito (i tentativi continuano)
             div { class: "text-sm text-base-content/60 truncate flex items-center gap-2",
                 if *loading.read() && !*ad_wait.read() {
-                    span { class: "loading loading-spinner loading-xs", aria_label: "Caricamento in corso" }
-                    span { "Caricamento pagina…" }
+                    span { class: "loading loading-spinner loading-xs", aria_label: "Loading" }
+                    span { "Loading page…" }
                 } else if *loading.read() && *ad_wait.read() {
-                    span { class: "loading loading-spinner loading-xs", aria_label: "Scansione in corso" }
-                    span { "Rilevata pubblicità: attendo il contenuto…" }
+                    span { class: "loading loading-spinner loading-xs", aria_label: "Scanning" }
+                    span { "Ad detected: waiting for content…" }
                 } else if *ad_wait.read() {
-                    span { class: "loading loading-spinner loading-xs", aria_label: "Scansione in corso" }
-                    span { "Rilevata pubblicità: catturo il contenuto…" }
+                    span { class: "loading loading-spinner loading-xs", aria_label: "Scanning" }
+                    span { "Ad detected: capturing content…" }
                 } else if page_title.read().trim().is_empty() {
-                    "Nessuna pagina caricata"
+                    "No page loaded"
                 } else {
                     "{page_title} — {page_url}"
                 }
@@ -300,7 +300,7 @@ pub fn AutoPage(
                 }
                 if candidates.read().is_empty() && load_error.read().is_none() && !*loading.read() {
                     div { class: "text-sm text-base-content/50",
-                        "Incolla l'URL di una pagina con un video: i media rilevati appaiono qui. Il browser gira in background: attendi qualche secondo affinché i player carichino i media."
+                        "Paste the URL of a page with a video: detected media will show up here. The browser runs in the background — wait a few seconds for players to load their media."
                     }
                 }
             }
@@ -328,7 +328,7 @@ fn CandidateRow(
             if candidate.is_stream {
                 span {
                     class: "badge badge-ghost badge-sm shrink-0",
-                    title: "HLS/DASH: convertito in MP4 via ffmpeg",
+                    title: "HLS/DASH: converted to MP4 via ffmpeg",
                     "stream"
                 }
             } else {

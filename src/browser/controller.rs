@@ -313,7 +313,7 @@ fn browser_thread(
                 }
                 _ => {
                     eprintln!("[browser] ERRORE: environment nullo");
-                    let _ = events.send(BrowserEvent::Error("WebView2: environment nullo".into()));
+                    let _ = events.send(BrowserEvent::Error("WebView2: null environment".into()));
                     return;
                 }
             }
@@ -345,7 +345,7 @@ fn browser_thread(
                 }
                 _ => {
                     eprintln!("[browser] ERRORE: controller nullo");
-                    let _ = events.send(BrowserEvent::Error("WebView2: controller nullo".into()));
+                    let _ = events.send(BrowserEvent::Error("WebView2: null controller".into()));
                     return;
                 }
             }
@@ -364,7 +364,7 @@ fn browser_thread(
 
         let Ok(webview) = controller.CoreWebView2() else {
             eprintln!("[browser] ERRORE: CoreWebView2 assente");
-            let _ = events.send(BrowserEvent::Error("WebView2: CoreWebView2 assente".into()));
+            let _ = events.send(BrowserEvent::Error("WebView2: CoreWebView2 missing".into()));
             return;
         };
         eprintln!("[browser] CoreWebView2 pronto");
@@ -782,9 +782,7 @@ fn browser_thread(
                                                 + std::time::Duration::from_secs(20),
                                         ));
                                         if !ad_notified.replace(true) {
-                                            eprintln!(
-                                                "[browser] pubblicità attiva: finestra scout estesa"
-                                            );
+                                            eprintln!("[browser] ad active: extended scout window");
                                             let _ = scout_events.send(BrowserEvent::AdWait(true));
                                         }
                                     }

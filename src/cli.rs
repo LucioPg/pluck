@@ -34,21 +34,21 @@ pub fn usage() -> String {
     "\
 ldwhelper — download manager
 
-Uso:
-  ldwhelper                             Avvia l'interfaccia grafica
-  ldwhelper <url> [referrer] [spoofing] Download diretto (senza UI)
-  ldwhelper <url> <spoofing>            Senza referrer: solo on|off
+Usage:
+  ldwhelper                             Launch the graphical UI
+  ldwhelper <url> [referrer] [spoofing] Direct download (no UI)
+  ldwhelper <url> <spoofing>            No referrer: on|off only
 
-Argomenti:
-  url       URL del file o della playlist (.m3u8/.mpd → HLS via ffmpeg)
-  referrer  Referrer da inviare con le richieste (opzionale)
-  spoofing  on|off — invio dell'header Referer (default: on; on richiede referrer)
+Arguments:
+  url       URL of the file or playlist (.m3u8/.mpd → HLS via ffmpeg)
+  referrer  Referrer to send with the requests (optional)
+  spoofing  on|off — sends the Referer header (default: on; on requires a referrer)
 
-Esempi:
-  ldwhelper https://esempio.com/video.mp4
-  ldwhelper https://esempio.com/video.mp4 https://esempio.com/
-  ldwhelper https://esempio.com/video.mp4 https://esempio.com/ on
-  ldwhelper https://esempio.com/video.mp4 off
+Examples:
+  ldwhelper https://example.com/video.mp4
+  ldwhelper https://example.com/video.mp4 https://example.com/
+  ldwhelper https://example.com/video.mp4 https://example.com/ on
+  ldwhelper https://example.com/video.mp4 off
 "
     .to_string()
 }
@@ -63,12 +63,12 @@ pub fn parse(args: &[String]) -> Result<CliAction, String> {
     }
     if args.len() > 3 {
         return Err(format!(
-            "Troppi argomenti (max 3: url, referrer, spoofing): {}",
+            "Too many arguments (max 3: url, referrer, spoofing): {}",
             args.len()
         ));
     }
     let url = args[0].clone();
-    reqwest::Url::parse(&url).map_err(|_| format!("URL non valido: {url}"))?;
+    reqwest::Url::parse(&url).map_err(|_| format!("Invalid URL: {url}"))?;
 
     /// `Some(Some(on))` = on/off riconosciuto; `Some(None)` = non è on/off.
     fn parse_spoof(v: &str) -> Option<Option<bool>> {
@@ -84,27 +84,27 @@ pub fn parse(args: &[String]) -> Result<CliAction, String> {
         && let Some(sp) = parse_spoof(v)
     {
         if args.len() > 2 {
-            return Err("Troppi argomenti: con spoofing diretto max 2 (url, spoofing)".into());
+            return Err("Too many arguments: with direct spoofing, max 2 (url, spoofing)".into());
         }
         (None, sp)
     } else {
         let referer = match args.get(1) {
             Some(r) => {
-                reqwest::Url::parse(r).map_err(|_| format!("Referrer non valido: {r}"))?;
+                reqwest::Url::parse(r).map_err(|_| format!("Invalid referrer: {r}"))?;
                 Some(r.clone())
             }
             None => None,
         };
         let spoofing = match args.get(2) {
             Some(v) => parse_spoof(v)
-                .ok_or_else(|| format!("Valore spoofing non riconosciuto: {v} (usare on|off)"))?,
+                .ok_or_else(|| format!("Unrecognized spoofing value: {v} (use on|off)"))?,
             None => None,
         };
         (referer, spoofing)
     };
     // Default: on (coerente con la UI). `on` esplicito senza referrer = contraddizione.
     if spoofing == Some(true) && referer.is_none() {
-        return Err("spoofing on richiede un referrer".into());
+        return Err("spoofing on requires a referrer".into());
     }
     Ok(CliAction::Download(CliArgs {
         url,
@@ -188,10 +188,10 @@ pub async fn download(args: CliArgs) -> i32 {
     println!("Destinazione: {}", dest.display());
     match &referer {
         Some(r) => println!("Referer: {r}"),
-        None => println!("Referer: (nessuno)"),
+        None => println!("Referer: (none)"),
     }
     if is_hls {
-        println!("Stream HLS/DASH: conversione in MP4 via ffmpeg");
+        println!("HLS/DASH stream: converting to MP4 via ffmpeg");
     }
 
     let (tx, mut rx) = mpsc::channel::<ProgressMessage>(100);
@@ -206,15 +206,15 @@ pub async fn download(args: CliArgs) -> i32 {
         if let Some(state) = msg.state {
             return match state {
                 DownloadState::Completed => {
-                    println!("\r\x1b[KCompletato: {}", dest.display());
+                    println!("\r\x1b[KCompleted: {}", dest.display());
                     0
                 }
                 DownloadState::Failed(m) => {
-                    eprintln!("\r\x1b[KFallito: {m}");
+                    eprintln!("\r\x1b[KFailed: {m}");
                     1
                 }
                 DownloadState::Cancelled => {
-                    eprintln!("\r\x1b[KAnnullato");
+                    eprintln!("\r\x1b[KCancelled");
                     1
                 }
                 DownloadState::Downloading | DownloadState::Paused => continue,
@@ -250,7 +250,7 @@ pub async fn download(args: CliArgs) -> i32 {
             }
         }
     }
-    eprintln!("\r\x1b[KDownload terminato senza esito (canale chiuso)");
+    eprintln!("\r\x1b[KDownload ended without a result (channel closed)");
     1
 }
 
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn explicit_on_without_referer_is_error() {
         let err = parse_str(&["https://a.com/v.mp4", "on"]).unwrap_err();
-        assert!(err.contains("richiede un referrer"), "errore: {err}");
+        assert!(err.contains("requires a referrer"), "errore: {err}");
     }
 
     #[test]

@@ -141,7 +141,7 @@ async fn run_hls(
             let _ = tx
                 .send(ProgressMessage {
                     id,
-                    state: Some(DownloadState::Failed(format!("Avvio ffmpeg: {e}"))),
+                    state: Some(DownloadState::Failed(format!("ffmpeg launch: {e}"))),
                     current: 0,
                     total: 0,
                 })
@@ -262,7 +262,7 @@ async fn run_hls(
         let _ = tokio::fs::remove_file(&dest).await;
         let mut reason = outcome.2.join(" | ");
         if reason.is_empty() {
-            reason = "ffmpeg è terminato senza completare il file".into();
+            reason = "ffmpeg ended without completing the file".into();
         }
         let _ = tx
             .send(ProgressMessage {
@@ -354,7 +354,7 @@ fn check_and_sum(text: &str) -> Result<Option<u64>, String> {
     let pl = m3u8_rs::parse_media_playlist_res(text.as_bytes())
         .map_err(|_| "playlist media non valida")?;
     if !pl.end_list {
-        return Err("Stream live: solo contenuti VOD sono scaricabili".into());
+        return Err("Live stream: only VOD content can be downloaded".into());
     }
     Ok(Some(
         pl.segments.iter().map(|s| s.duration as f64).sum::<f64>() as u64,
