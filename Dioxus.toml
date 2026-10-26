@@ -1,5 +1,5 @@
 [application]
-name = "ldwhelper"
+name = "pluck"
 
 [bundle]
 icon = ["assets/icon.ico"]

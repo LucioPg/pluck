@@ -77,7 +77,7 @@ pub fn App() -> Element {
     // Spoofing referrer: invio dell'header Referer sui download/probe. Attivo di
     // default (scelta punto 1 todo); il radio nell'header lo disattiva globalmente.
     let mut spoofing = use_signal(|| true);
-    // Referer preferiti: caricati una sola volta all'avvio da %APPDATA%/ldwhelper/referers.json
+    // Referer preferiti: caricati una sola volta all'avvio da %APPDATA%/pluck/referers.json
     let mut referer_store = use_signal(|| RefererStore::load(RefererStore::default_path()));
 
     // Canale creato una sola volta; receiver spawnato qui dentro (niente doppi spawn)

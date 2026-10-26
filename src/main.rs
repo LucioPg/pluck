@@ -1,6 +1,6 @@
-//! ldwhelper — desktop download manager.
+//! pluck — desktop download manager.
 //!
-//! Senza argomenti avvia la UI grafica; con `ldwhelper <url> [referrer] [on|off]`
+//! Senza argomenti avvia la UI grafica; con `pluck <url> [referrer] [on|off]`
 //! scarica direttamente da linea di comando (vedi `cli::usage`).
 
 mod browser;

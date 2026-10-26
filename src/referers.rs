@@ -1,5 +1,5 @@
 //! Persistenza referer preferiti. Layer app: nessuna dipendenza UI.
-//! File `%APPDATA%/ldwhelper/referers.json`.
+//! File `%APPDATA%/pluck/referers.json`.
 //!
 //! Privacy: il file è cifrato con DPAPI Windows (chiave legata all'account
 //! utente). In load viene accettato anche il plaintext legacy (migrazione
@@ -20,7 +20,7 @@ pub struct RefererStore {
 }
 
 impl RefererStore {
-    /// Percorso default: `<data_dir>/ldwhelper/referers.json` (Windows: %APPDATA%)
+    /// Percorso default: `<data_dir>/pluck/referers.json` (Windows: %APPDATA%)
     /// Fallback `.` (CWD) se `dirs::data_dir()` è None (irraggiungibile su Windows).
     pub fn default_path() -> PathBuf {
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
