@@ -202,32 +202,18 @@ pub fn App() -> Element {
                 header { class: "flex items-center justify-between gap-4",
                     h1 { class: "text-2xl font-bold shrink-0", "ldwhelper v{env!(\"CARGO_PKG_VERSION\")}" }
                     div { class: "flex items-center gap-3",
-                        // Spoofing referrer: ON/OFF globale (default ON)
-                        div {
-                            class: "flex items-center gap-2.5 rounded-full bg-base-200 px-3.5 py-1.5 shrink-0",
+                        // Spoofing referrer: toggle ON/OFF globale (default ON,
+                        // stessi identici modelli di PWDManager — toggle daisyUI)
+                        label {
+                            class: "flex items-center gap-2.5 rounded-full bg-base-200 px-3.5 py-1.5 shrink-0 cursor-pointer",
                             title: "Spoofing referrer: invia l'header Referer con i download (sostituzione del referrer)",
                             span { class: "text-xs font-semibold uppercase tracking-wide opacity-60", "Spoofing" }
-                            label { class: "flex cursor-pointer items-center gap-1.5 text-sm",
-                                input {
-                                    r#type: "radio",
-                                    name: "spoofing-referrer",
-                                    class: "radio radio-primary radio-xs",
-                                    checked: *spoofing.read(),
-                                    onclick: move |_| spoofing.set(true),
-                                    aria_label: "Spoofing referrer attivo",
-                                }
-                                "On"
-                            }
-                            label { class: "flex cursor-pointer items-center gap-1.5 text-sm",
-                                input {
-                                    r#type: "radio",
-                                    name: "spoofing-referrer",
-                                    class: "radio radio-primary radio-xs",
-                                    checked: !*spoofing.read(),
-                                    onclick: move |_| spoofing.set(false),
-                                    aria_label: "Spoofing referrer disattivato",
-                                }
-                                "Off"
+                            input {
+                                r#type: "checkbox",
+                                class: "toggle spoof-toggle toggle-sm",
+                                checked: *spoofing.read(),
+                                onchange: move |_| spoofing.toggle(),
+                                aria_label: "Spoofing referrer attivo",
                             }
                         }
                         button {

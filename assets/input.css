@@ -1,3 +1,14 @@
 @import "tailwindcss";
 @plugin "daisyui";
 @source "../src/**/*.rs";
+
+/* ============================================================
+   Toggle stile riferimento (track colorato quando ON, knob
+   bianco): daisyUI 5 usa il colore per il knob — qui lo
+   invertiamo solo per lo spoofing. Animazione/geometry restano
+   le regole .toggle di daisyUI.
+   ============================================================ */
+.spoof-toggle:checked {
+    background-color: var(--color-success);
+    --input-color: var(--color-base-100);
+}
