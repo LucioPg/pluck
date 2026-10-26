@@ -14,15 +14,28 @@ pub fn DownloadList(
     downloads: Signal<Vec<DownloadItem>>,
     controls: Signal<HashMap<DownloadId, DownloadControl>>,
     on_open_failed: EventHandler<String>,
+    on_remove: EventHandler<DownloadId>,
+    on_clear_all: EventHandler<()>,
 ) -> Element {
     rsx! {
         div { class: "flex-1 w-full rounded-box border-2 border-base-300 bg-base-200 p-3 shadow-sm flex flex-col gap-1.5 overflow-y-auto",
+            if !downloads.read().is_empty() {
+                div { class: "flex justify-end shrink-0",
+                    button {
+                        class: "btn btn-xs btn-ghost",
+                        title: "Remove all downloads from the list (active ones are cancelled). Files on disk are not touched.",
+                        onclick: move |_| on_clear_all.call(()),
+                        "Clear list"
+                    }
+                }
+            }
             for item in downloads.read().iter() {
                 DownloadRow {
                     key: "{item.id}",
                     item: item.clone(),
                     controls,
                     on_open_failed,
+                    on_remove,
                 }
             }
             if downloads.read().is_empty() {
@@ -39,6 +52,7 @@ fn DownloadRow(
     item: DownloadItem,
     controls: Signal<HashMap<DownloadId, DownloadControl>>,
     on_open_failed: EventHandler<String>,
+    on_remove: EventHandler<DownloadId>,
 ) -> Element {
     let is_terminal = matches!(
         item.state,
@@ -176,6 +190,15 @@ fn DownloadRow(
                             }
                         },
                         "Cancel"
+                    }
+                }
+                if is_terminal {
+                    button {
+                        class: "btn btn-xs btn-ghost",
+                        title: "Remove from list (file on disk is not touched)",
+                        aria_label: "Remove download from list",
+                        onclick: move |_| on_remove.call(item.id),
+                        "✕"
                     }
                 }
             }

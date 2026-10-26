@@ -268,6 +268,29 @@ pub fn App() -> Element {
                         on_open_failed: move |msg: String| {
                             push_toast(toasts, msg);
                         },
+                        on_remove: move |id: DownloadId| {
+                            downloads.write().retain(|d| d.id != id);
+                            controls.write().remove(&id);
+                        },
+                        on_clear_all: move |_| {
+                            // I download ancora attivi vengono annullati prima di
+                            // svuotare la lista: nessuna riga orfana che continua
+                            // a scaricare senza controllo. I file su disco non
+                            // vengono toccati (il cancel rimuove i parziali).
+                            for item in downloads.read().iter() {
+                                if !matches!(
+                                    item.state,
+                                    DownloadState::Completed
+                                        | DownloadState::Failed(_)
+                                        | DownloadState::Cancelled
+                                ) && let Some(ctl) = controls.read().get(&item.id)
+                                {
+                                    ctl.cancel.cancel();
+                                }
+                            }
+                            downloads.write().clear();
+                            controls.write().clear();
+                        },
                     }
                 }
             }
