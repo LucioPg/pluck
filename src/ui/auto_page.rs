@@ -118,7 +118,7 @@ pub fn AutoPage(
         };
         // Spoofing OFF → nessun Referer sul download
         let referer = if *spoofing.read() {
-            page_url.read().trim().to_string()
+            browser::site_root(page_url.read().trim())
         } else {
             String::new()
         };
@@ -521,7 +521,7 @@ fn init_browser(
                     if c.size.is_none() && !c.is_stream {
                         // Spoofing OFF → probe senza Referer
                         let referer = if *spoofing.read() {
-                            page_url.read().trim().to_string()
+                            browser::site_root(page_url.read().trim())
                         } else {
                             String::new()
                         };
@@ -541,7 +541,7 @@ fn init_browser(
                         });
                     } else if c.is_stream {
                         let referer = if *spoofing.read() {
-                            page_url.read().trim().to_string()
+                            browser::site_root(page_url.read().trim())
                         } else {
                             String::new()
                         };

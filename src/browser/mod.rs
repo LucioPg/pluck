@@ -65,6 +65,18 @@ pub fn name_from_url(url: &str, _from_video: bool) -> String {
     }
 }
 
+/// Origin del sito da un URL: `https://www.sito.it/media/file.mp4` →
+/// `https://www.sito.it/`. Referer per i download automatici (la root è ciò che
+/// i CDN tipicamente accettano; il path completo no). URL non valido → invariato.
+pub fn site_root(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|u| match u.port() {
+            Some(port) => format!("{}://{}:{}/", u.scheme(), u.host_str().unwrap_or(""), port),
+            None => format!("{}://{}/", u.scheme(), u.host_str().unwrap_or("")),
+        })
+        .unwrap_or_else(|_| url.to_string())
+}
+
 /// HEAD probe: dimensione del candidato DOM (senza Content-Length da CDP).
 /// Redirect seguiti (URL firmati CDN); 3s di timeout; None = non determinabile.
 pub async fn probe_size(url: &str, referer: Option<&str>) -> Option<u64> {
@@ -322,5 +334,20 @@ mod tests {
         assert_eq!(format_bytes(2 * 1024_u64.pow(3)), "2.0 GB");
         let big = 8 * 1024_u64.pow(4);
         assert!(format_bytes(big).ends_with("TB"));
+    }
+
+    #[test]
+    fn site_root_keeps_scheme_and_host() {
+        assert_eq!(
+            site_root("https://www.sito.it/media/file.mp4"),
+            "https://www.sito.it/"
+        );
+        assert_eq!(
+            site_root("http://cdn.example.com/a/b.mp4?token=1"),
+            "http://cdn.example.com/"
+        );
+        assert_eq!(site_root("https://host:8443/x.m3u8"), "https://host:8443/");
+        // URL non valido → invariato (chiamanti filtrano il vuoto)
+        assert_eq!(site_root(""), "");
     }
 }
