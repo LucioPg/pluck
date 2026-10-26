@@ -113,7 +113,7 @@ loading after a play event. HLS playlists are handed to a bundled ffmpeg. The UI
 
 **LucioPg** — [luciopg.github.io](https://luciopg.github.io)
 
-Project page: [luciopg.github.io/ldwmanager](https://luciopg.github.io/ldwmanager/)
+Project page: [luciopg.github.io/ldwhelper](https://luciopg.github.io/ldwhelper/)
 
 ---
-<p align="center"><a href="https://luciopg.github.io">luciopg.github.io</a> · <a href="https://luciopg.github.io/ldwmanager/">Project page</a> · <a href="https://github.com/LucioPg/ldwhelper/releases/latest">Download</a> · <a href="https://github.com/LucioPg/ldwhelper/issues">Issues</a></p>
+<p align="center"><a href="https://luciopg.github.io">luciopg.github.io</a> · <a href="https://luciopg.github.io/ldwhelper/">Project page</a> · <a href="https://github.com/LucioPg/ldwhelper/releases/latest">Download</a> · <a href="https://github.com/LucioPg/ldwhelper/issues">Issues</a></p>
