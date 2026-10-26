@@ -1,6 +1,6 @@
 use crate::browser::format_bytes;
 use crate::download::types::{
-    format_time, DownloadControl, DownloadId, DownloadItem, DownloadState,
+    DownloadControl, DownloadId, DownloadItem, DownloadState, format_time,
 };
 use crate::ui::thumb::Thumb;
 use dioxus::prelude::*;

@@ -37,7 +37,10 @@ pub fn spawn_hls_download(
     // Pausa non supportata: canale fittizio (l'UI non mostra il bottone)
     let (pause_tx, _pause_rx) = watch::channel(false);
     let cancel = CancellationToken::new();
-    let control = DownloadControl { cancel: cancel.clone(), pause: pause_tx };
+    let control = DownloadControl {
+        cancel: cancel.clone(),
+        pause: pause_tx,
+    };
     tokio::spawn(run_hls(id, url, referer, dest, tx, cancel));
     control
 }
@@ -54,7 +57,12 @@ async fn run_hls(
         let tx = tx.clone();
         async move {
             let _ = tx
-                .send(ProgressMessage { id, state, current, total })
+                .send(ProgressMessage {
+                    id,
+                    state,
+                    current,
+                    total,
+                })
                 .await;
         }
     };
@@ -296,28 +304,23 @@ async fn ensure_ffmpeg(
         .map_err(|e| format!("cartella ffmpeg: {e}"))?;
     let tx = tx.clone();
     tokio::task::spawn_blocking(move || {
-        let url = ffmpeg_sidecar::download::ffmpeg_download_url()
-            .map_err(|e| e.to_string())?;
+        let url = ffmpeg_sidecar::download::ffmpeg_download_url().map_err(|e| e.to_string())?;
         let archive =
-            ffmpeg_sidecar::download::download_ffmpeg_package_with_progress(
-                url,
-                &ff_dir,
-                |ev| {
-                    // Progresso in byte: riusa la barra della riga download
-                    if let ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::Downloading {
-                        total_bytes,
-                        downloaded_bytes,
-                    } = ev
-                    {
-                        let _ = tx.blocking_send(ProgressMessage {
-                            id,
-                            state: None,
-                            current: downloaded_bytes,
-                            total: total_bytes,
-                        });
-                    }
-                },
-            )
+            ffmpeg_sidecar::download::download_ffmpeg_package_with_progress(url, &ff_dir, |ev| {
+                // Progresso in byte: riusa la barra della riga download
+                if let ffmpeg_sidecar::download::FfmpegDownloadProgressEvent::Downloading {
+                    total_bytes,
+                    downloaded_bytes,
+                } = ev
+                {
+                    let _ = tx.blocking_send(ProgressMessage {
+                        id,
+                        state: None,
+                        current: downloaded_bytes,
+                        total: total_bytes,
+                    });
+                }
+            })
             .map_err(|e| e.to_string())?;
         ffmpeg_sidecar::download::unpack_ffmpeg_without_extras(&archive, &ff_dir)
             .map_err(|e| e.to_string())?;
@@ -353,7 +356,9 @@ fn check_and_sum(text: &str) -> Result<Option<u64>, String> {
     if !pl.end_list {
         return Err("Stream live: solo contenuti VOD sono scaricabili".into());
     }
-    Ok(Some(pl.segments.iter().map(|s| s.duration as f64).sum::<f64>() as u64))
+    Ok(Some(
+        pl.segments.iter().map(|s| s.duration as f64).sum::<f64>() as u64,
+    ))
 }
 
 async fn fetch_text(url: &str, referer: Option<&str>) -> Option<String> {
@@ -470,7 +475,10 @@ mod tests {
     fn media_playlist_duration_sum() {
         let text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:9.5,\na.ts\n#EXTINF:10.5,\nb.ts\n#EXT-X-ENDLIST\n";
         assert_eq!(check_and_sum(text).ok().flatten(), Some(20));
-        assert_eq!(check_and_sum("not a playlist"), Err("playlist media non valida".into()));
+        assert_eq!(
+            check_and_sum("not a playlist"),
+            Err("playlist media non valida".into())
+        );
     }
 
     #[test]

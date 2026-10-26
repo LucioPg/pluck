@@ -26,7 +26,8 @@ pub fn candidate_from_response_received(params: &serde_json::Value) -> Option<Me
         .get("headers")
         .and_then(|h| h.as_object())
         .and_then(|h| {
-            h.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            h.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         })
         .and_then(|(_, v)| v.as_str())
         .and_then(|v| v.trim().parse::<u64>().ok());
@@ -96,9 +97,11 @@ pub fn classify(url: &str, mime: &str, resource_type: &str) -> Option<MediaCandi
 /// estensione (es. proxy PHP tipo `player-x.php?q=…` che streamma il file).
 fn video_extension(url_lower: &str) -> bool {
     let path = url_lower.split(['?', '#']).next().unwrap_or(url_lower);
-    [".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".ts"]
-        .iter()
-        .any(|ext| path.ends_with(ext))
+    [
+        ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".ts",
+    ]
+    .iter()
+    .any(|ext| path.ends_with(ext))
 }
 
 pub fn classify_dom(url: &str, from_video: bool, thumbnail: &str) -> Option<MediaCandidate> {
@@ -123,8 +126,7 @@ pub fn classify_dom(url: &str, from_video: bool, thumbnail: &str) -> Option<Medi
 /// relativi/blob senza contesto di pagina).
 fn valid_thumbnail(url: &str) -> Option<String> {
     let trimmed = url.trim();
-    (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
-        .then(|| trimmed.to_string())
+    (trimmed.starts_with("http://") || trimmed.starts_with("https://")).then(|| trimmed.to_string())
 }
 
 /// Raccolta dedup con cap: il thread browser inoltra all'UI solo i candidati nuovi.
@@ -137,7 +139,11 @@ pub struct CandidateSet {
 
 impl CandidateSet {
     pub fn new(cap: usize) -> Self {
-        Self { seen: Default::default(), count: 0, cap }
+        Self {
+            seen: Default::default(),
+            count: 0,
+            cap,
+        }
     }
 
     /// `true` se il candidato è nuovo e sotto cap (va inoltrato all'UI).
@@ -179,7 +185,9 @@ mod tests {
     #[test]
     fn media_resource_is_candidate() {
         let c = candidate_from_response_received(&params(
-            "https://cdn.com/v/clip.mp4", "video/mp4", "Media",
+            "https://cdn.com/v/clip.mp4",
+            "video/mp4",
+            "Media",
         ))
         .expect("candidato atteso");
         assert!(!c.is_stream);
@@ -190,7 +198,9 @@ mod tests {
     fn mp4_via_xhr_is_not_stream() {
         // i player JS scaricano mp4 progressivi via XHR/Fetch con range request
         let c = candidate_from_response_received(&params(
-            "https://cdn.com/v/movie.mp4", "application/octet-stream", "XHR",
+            "https://cdn.com/v/movie.mp4",
+            "application/octet-stream",
+            "XHR",
         ))
         .expect("candidato atteso");
         assert!(!c.is_stream);
@@ -199,14 +209,18 @@ mod tests {
     #[test]
     fn m3u8_by_extension_and_by_mime() {
         let c = candidate_from_response_received(&params(
-            "https://cdn.com/hls/index.m3u8", "application/vnd.apple.mpegurl", "XHR",
+            "https://cdn.com/hls/index.m3u8",
+            "application/vnd.apple.mpegurl",
+            "XHR",
         ))
         .expect("candidato atteso");
         assert!(c.is_stream);
 
         // playlist servita senza estensione: il mimeType la smaschera
         let c = candidate_from_response_received(&params(
-            "https://cdn.com/hls/playlist", "application/vnd.apple.mpegurl", "Fetch",
+            "https://cdn.com/hls/playlist",
+            "application/vnd.apple.mpegurl",
+            "Fetch",
         ))
         .expect("candidato atteso");
         assert!(c.is_stream);
@@ -215,7 +229,9 @@ mod tests {
     #[test]
     fn mpd_by_extension_and_by_mime() {
         let c = candidate_from_response_received(&params(
-            "https://cdn.com/dash/manifest.mpd", "application/dash+xml", "Fetch",
+            "https://cdn.com/dash/manifest.mpd",
+            "application/dash+xml",
+            "Fetch",
         ))
         .expect("candidato atteso");
         assert!(c.is_stream);
@@ -223,26 +239,42 @@ mod tests {
 
     #[test]
     fn ignores_non_media_resources() {
-        assert!(candidate_from_response_received(&params(
-            "https://cdn.com/app.js", "application/javascript", "Script",
-        ))
-        .is_none());
-        assert!(candidate_from_response_received(&params(
-            "https://cdn.com/img.png", "image/png", "Image",
-        ))
-        .is_none());
+        assert!(
+            candidate_from_response_received(&params(
+                "https://cdn.com/app.js",
+                "application/javascript",
+                "Script",
+            ))
+            .is_none()
+        );
+        assert!(
+            candidate_from_response_received(&params(
+                "https://cdn.com/img.png",
+                "image/png",
+                "Image",
+            ))
+            .is_none()
+        );
     }
 
     #[test]
     fn ignores_blob_and_data_urls() {
-        assert!(candidate_from_response_received(&params(
-            "blob:https://cdn.com/1234", "video/mp4", "Media",
-        ))
-        .is_none());
-        assert!(candidate_from_response_received(&params(
-            "data:video/mp4;base64,AAAA", "video/mp4", "Media",
-        ))
-        .is_none());
+        assert!(
+            candidate_from_response_received(&params(
+                "blob:https://cdn.com/1234",
+                "video/mp4",
+                "Media",
+            ))
+            .is_none()
+        );
+        assert!(
+            candidate_from_response_received(&params(
+                "data:video/mp4;base64,AAAA",
+                "video/mp4",
+                "Media",
+            ))
+            .is_none()
+        );
     }
 
     #[test]
@@ -295,12 +327,8 @@ mod tests {
     #[test]
     fn dom_video_src_without_extension_is_candidate() {
         // proxy PHP che streamma il video: nessuna estensione ma è src del <video>
-        let c = classify_dom(
-            "https://sito.com/player-x.php?q=cG9zdF9pZA%3D%3D",
-            true,
-            "",
-        )
-        .expect("candidato atteso");
+        let c = classify_dom("https://sito.com/player-x.php?q=cG9zdF9pZA%3D%3D", true, "")
+            .expect("candidato atteso");
         assert!(!c.is_stream);
         assert!(c.thumbnail.is_none());
     }
@@ -325,14 +353,24 @@ mod tests {
         // relativo/blob/vuoto → scartati
         for bad in ["", "/relativo.jpg", "blob:https://sito.com/1"] {
             let c = classify_dom("https://sito.com/clip.mp4", true, bad).expect("atteso");
-            assert!(c.thumbnail.is_none(), "thumbnail {bad:?} deve essere scartata");
+            assert!(
+                c.thumbnail.is_none(),
+                "thumbnail {bad:?} deve essere scartata"
+            );
         }
     }
 
     #[test]
     fn media_segments_are_filtered() {
         assert!(classify("https://cdn.com/hls/seg-1-v1-a1.ts", "video/mp2t", "Media").is_none());
-        assert!(classify("https://cdn.com/dash/index_3.m4s", "video/iso.segment", "Media").is_none());
+        assert!(
+            classify(
+                "https://cdn.com/dash/index_3.m4s",
+                "video/iso.segment",
+                "Media"
+            )
+            .is_none()
+        );
         assert!(classify_dom("https://cdn.com/hls/segment12.ts", false, "").is_none());
         assert!(classify_dom("https://cdn.com/hls/chunk_0007.ts", false, "").is_none());
         // .ts generico (non segmento) e tutto il resto passano
@@ -343,13 +381,15 @@ mod tests {
     #[test]
     fn ad_urls_are_never_candidates() {
         // CDP e DOM: gli host/segmenti advertising pubblici sono scartati
-        assert!(classify("https://pubads.g.doubleclick.net/v.mp4", "video/mp4", "Media").is_none());
-        assert!(classify(
-            "https://cdn.com/ads/spot.mp4",
-            "video/mp4",
-            "Media"
-        )
-        .is_none());
+        assert!(
+            classify(
+                "https://pubads.g.doubleclick.net/v.mp4",
+                "video/mp4",
+                "Media"
+            )
+            .is_none()
+        );
+        assert!(classify("https://cdn.com/ads/spot.mp4", "video/mp4", "Media").is_none());
         assert!(classify_dom("https://sito.com/ad/clip.mp4", true, "").is_none());
         assert!(classify_dom("https://googlesyndication.com/x.m3u8", true, "").is_none());
         // falsi positivi da evitare: "/add/", "/read/", "upload" passano

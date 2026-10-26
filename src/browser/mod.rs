@@ -167,7 +167,9 @@ impl BrowserHandle {
 
     #[allow(dead_code)] // fase futura: "mostra pagina" per login
     pub fn set_bounds(&self, left: f64, top: f64, right: f64, bottom: f64) {
-        let _ = self.tx.send(BrowserCommand::SetBounds(left, top, right, bottom));
+        let _ = self
+            .tx
+            .send(BrowserCommand::SetBounds(left, top, right, bottom));
     }
 
     /// Shutdown graceful: Close() del controller + attesa ack (max `timeout`).
@@ -221,16 +223,20 @@ pub fn sanitize_filename(raw: &str) -> String {
 
 /// Estensione dal path dell'URL del candidato (default `.mp4`).
 pub fn extension_from_url(url: &str) -> String {
-    reqwest::Url::parse(url).ok().and_then(|u| {
-        let last = u.path().rsplit('/').next().unwrap_or("");
-        let ext = last.rsplit('.').next().unwrap_or("");
-        let valid = !ext.is_empty()
-            && ext.len() <= 5
-            && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            && last.contains('.');
-        valid.then(|| format!(".{}", ext.to_ascii_lowercase()))
-            .filter(|e| e != ".m3u8" && e != ".mpd")
-    }).unwrap_or_else(|| ".mp4".to_string())
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            let last = u.path().rsplit('/').next().unwrap_or("");
+            let ext = last.rsplit('.').next().unwrap_or("");
+            let valid = !ext.is_empty()
+                && ext.len() <= 5
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && last.contains('.');
+            valid
+                .then(|| format!(".{}", ext.to_ascii_lowercase()))
+                .filter(|e| e != ".m3u8" && e != ".mpd")
+        })
+        .unwrap_or_else(|| ".mp4".to_string())
 }
 
 /// Percorso del profilo dedicato del browser embedded (isolato dai cookie utente).
@@ -249,7 +255,10 @@ mod tests {
 
     #[test]
     fn sanitize_replaces_illegal_chars() {
-        assert_eq!(sanitize_filename(r#"video: "top" 10/20?"#), "video_ _top_ 10_20_");
+        assert_eq!(
+            sanitize_filename(r#"video: "top" 10/20?"#),
+            "video_ _top_ 10_20_"
+        );
     }
 
     #[test]
@@ -269,7 +278,10 @@ mod tests {
     #[test]
     fn extension_from_url_paths() {
         assert_eq!(extension_from_url("https://a.com/v/clip.mp4"), ".mp4");
-        assert_eq!(extension_from_url("https://a.com/VID.webm?token=1"), ".webm");
+        assert_eq!(
+            extension_from_url("https://a.com/VID.webm?token=1"),
+            ".webm"
+        );
         assert_eq!(extension_from_url("https://a.com/noext"), ".mp4");
         assert_eq!(extension_from_url("https://a.com/x.MP4"), ".mp4");
         // streaming: mai suggestioni m3u8/mpd

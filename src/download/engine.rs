@@ -22,7 +22,10 @@ pub fn spawn_download(
 ) -> DownloadControl {
     let (pause_tx, pause_rx) = watch::channel(false);
     let cancel = CancellationToken::new();
-    let control = DownloadControl { cancel: cancel.clone(), pause: pause_tx };
+    let control = DownloadControl {
+        cancel: cancel.clone(),
+        pause: pause_tx,
+    };
     tokio::spawn(run_download(id, url, referer, dest, tx, cancel, pause_rx));
     control
 }
@@ -34,37 +37,52 @@ async fn run_download(
     dest: PathBuf,
     tx: mpsc::Sender<ProgressMessage>,
     cancel: CancellationToken,
-    mut pause_rx: watch::Receiver<bool>,  // mut: wait_for/changed richiedono &mut self
+    mut pause_rx: watch::Receiver<bool>, // mut: wait_for/changed richiedono &mut self
 ) {
     match attempt(&id, &url, &referer, &dest, 0, &tx, &cancel, &mut pause_rx).await {
         Attempt::Completed => {}
         Attempt::Cancelled => {}
         // Stream morto con byte scaricati → recovery Range una tantum
         Attempt::Disconnected { current } if current > 0 => {
-            match attempt(&id, &url, &referer, &dest, current, &tx, &cancel, &mut pause_rx).await {
+            match attempt(
+                &id,
+                &url,
+                &referer,
+                &dest,
+                current,
+                &tx,
+                &cancel,
+                &mut pause_rx,
+            )
+            .await
+            {
                 Attempt::Completed | Attempt::Cancelled => {}
                 Attempt::Disconnected { current: newer } => {
-                    let _ = tx.send(ProgressMessage {
-                        id,
-                        state: Some(DownloadState::Failed(
-                            "Connessione persa, recovery fallita".into(),
-                        )),
-                        current: newer,
-                        total: 0,
-                    }).await;
+                    let _ = tx
+                        .send(ProgressMessage {
+                            id,
+                            state: Some(DownloadState::Failed(
+                                "Connessione persa, recovery fallita".into(),
+                            )),
+                            current: newer,
+                            total: 0,
+                        })
+                        .await;
                 }
                 Attempt::FailedAlreadyReported => {}
             }
         }
         Attempt::Disconnected { .. } => {
-            let _ = tx.send(ProgressMessage {
-                id,
-                state: Some(DownloadState::Failed(
-                    "Connessione persa o URL non raggiungibile".into(),
-                )),
-                current: 0,
-                total: 0,
-            }).await;
+            let _ = tx
+                .send(ProgressMessage {
+                    id,
+                    state: Some(DownloadState::Failed(
+                        "Connessione persa o URL non raggiungibile".into(),
+                    )),
+                    current: 0,
+                    total: 0,
+                })
+                .await;
         }
         Attempt::FailedAlreadyReported => {}
     }
@@ -74,7 +92,9 @@ enum Attempt {
     Completed,
     Cancelled,
     /// Stream/connessione morto; `current` = byte salvati finora
-    Disconnected { current: u64 },
+    Disconnected {
+        current: u64,
+    },
     /// Errore terminale (HTTP, disco): motivo già inviato via canale
     FailedAlreadyReported,
 }
@@ -88,7 +108,7 @@ async fn attempt(
     offset: u64,
     tx: &mpsc::Sender<ProgressMessage>,
     cancel: &CancellationToken,
-    pause_rx: &mut watch::Receiver<bool>,  // wait_for/changed: &mut self
+    pause_rx: &mut watch::Receiver<bool>, // wait_for/changed: &mut self
 ) -> Attempt {
     // Timeout client: connect limita l'handshake TCP/TLS, read_timeout è idle tra
     // read del body (download lunghi legittimi restano possibili)
@@ -128,12 +148,14 @@ async fn attempt(
     };
     let status = response.status();
     if !status.is_success() {
-        let _ = tx.send(ProgressMessage {
-            id: *id,
-            state: Some(DownloadState::Failed(format!("HTTP {status}"))),
-            current: offset,
-            total: 0,
-        }).await;
+        let _ = tx
+            .send(ProgressMessage {
+                id: *id,
+                state: Some(DownloadState::Failed(format!("HTTP {status}"))),
+                current: offset,
+                total: 0,
+            })
+            .await;
         return Attempt::FailedAlreadyReported;
     }
 
@@ -148,14 +170,16 @@ async fn attempt(
             .and_then(|s| s.trim().parse::<u64>().ok())
             .is_some_and(|start| start == offset);
         if !start_ok {
-            let _ = tx.send(ProgressMessage {
-                id: *id,
-                state: Some(DownloadState::Failed(format!(
-                    "Server non conforme: Content-Range non inizia a {offset}"
-                ))),
-                current: offset,
-                total: 0,
-            }).await;
+            let _ = tx
+                .send(ProgressMessage {
+                    id: *id,
+                    state: Some(DownloadState::Failed(format!(
+                        "Server non conforme: Content-Range non inizia a {offset}"
+                    ))),
+                    current: offset,
+                    total: 0,
+                })
+                .await;
             return Attempt::FailedAlreadyReported;
         }
     }
@@ -179,7 +203,14 @@ async fn attempt(
     } else {
         content_len
     };
-    let _ = tx.send(ProgressMessage { id: *id, state: None, current, total }).await;
+    let _ = tx
+        .send(ProgressMessage {
+            id: *id,
+            state: None,
+            current,
+            total,
+        })
+        .await;
 
     // open cancel-aware (open è atomico: nessun file parziale intermedio)
     let opened = {
@@ -208,12 +239,14 @@ async fn attempt(
     let mut file = match opened {
         Ok(f) => f,
         Err(e) => {
-            let _ = tx.send(ProgressMessage {
-                id: *id,
-                state: Some(DownloadState::Failed(format!("Errore apertura file: {e}"))),
-                current,
-                total,
-            }).await;
+            let _ = tx
+                .send(ProgressMessage {
+                    id: *id,
+                    state: Some(DownloadState::Failed(format!("Errore apertura file: {e}"))),
+                    current,
+                    total,
+                })
+                .await;
             return Attempt::FailedAlreadyReported;
         }
     };
@@ -226,12 +259,14 @@ async fn attempt(
         // pause_rx.changed() subito pronto → continue; senza questo check il download
         // continuerebbe mentre risulta in pausa.
         if !cancel.is_cancelled() && *pause_rx.borrow_and_update() {
-            let _ = tx.send(ProgressMessage {
-                id: *id,
-                state: Some(DownloadState::Paused),
-                current,
-                total,
-            }).await;
+            let _ = tx
+                .send(ProgressMessage {
+                    id: *id,
+                    state: Some(DownloadState::Paused),
+                    current,
+                    total,
+                })
+                .await;
             tokio::select! {
                 // attesa resume NON blocca il cancel
                 _ = pause_rx.wait_for(|p| !*p) => {}
@@ -529,8 +564,8 @@ mod tests {
 
     /// Prima risposta 200: head con content-length pieno ma body troncato a 16 byte
     fn truncated_first_response() -> Vec<u8> {
-        let mut raw = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", BODY.len())
-            .into_bytes();
+        let mut raw =
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", BODY.len()).into_bytes();
         raw.extend_from_slice(&BODY[..16]);
         raw
     }
@@ -582,8 +617,8 @@ mod tests {
     #[tokio::test]
     async fn recovery_without_range_restarts_from_zero() {
         // 2ª risposta: 200 COMPLETO (server che ignora Range) → restart da zero
-        let mut second = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", BODY.len())
-            .into_bytes();
+        let mut second =
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", BODY.len()).into_bytes();
         second.extend_from_slice(BODY);
 
         let (url, server) = spawn_raw_server(vec![truncated_first_response(), second]).await;
