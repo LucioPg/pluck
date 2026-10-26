@@ -121,14 +121,18 @@ pub fn NewDownloadDialog(
                                         onclick: move |_| dropdown_open.set(true),
                                         "Referer salvati ({referers.len()}) ▾"
                                     }
-                                    ul { class: "dropdown-content menu bg-base-200 rounded-box z-50 w-80 p-2 shadow-lg",
+                                    // Niente classe `menu` DaisyUI: le sue regole
+                                    // (flex-flow column wrap + display grid sui
+                                    // figli) sfondano il pannello con URL lunghi
+                                    // (voci in colonne affiancate). Flex puro.
+                                    ul { class: "dropdown-content bg-base-200 rounded-box z-50 w-80 flex flex-col gap-1 p-2 shadow-lg",
                                         // Due closure `move` per voce → due copie di `r`
                                         // (una closure consumerebbe `r` dell'altra).
                                         for (r, r_del) in referers.iter().cloned().map(|r| (r.clone(), r)) {
                                             li { class: "flex items-center justify-between gap-2",
                                                 key: "{r}",
                                                 button {
-                                                    class: "min-w-0 truncate text-left",
+                                                    class: "min-w-0 flex-1 truncate rounded-md px-3 py-2 text-sm text-left hover:bg-base-300",
                                                     onclick: move |_| {
                                                         referer.set(r.clone());
                                                         dropdown_open.set(false);
@@ -136,7 +140,7 @@ pub fn NewDownloadDialog(
                                                     "{r}"
                                                 }
                                                 button {
-                                                    class: "btn btn-ghost btn-xs",
+                                                    class: "btn btn-ghost btn-xs shrink-0",
                                                     aria_label: "Elimina referer",
                                                     onclick: move |_| on_remove_referer(r_del.clone()),
                                                     "✕"
