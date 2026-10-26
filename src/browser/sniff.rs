@@ -130,9 +130,9 @@ fn valid_thumbnail(url: &str) -> Option<String> {
     (trimmed.starts_with("http://") || trimmed.starts_with("https://")).then(|| trimmed.to_string())
 }
 
-/// Player embed noti che tipicamente non partono da soli nel webview invisibile
-/// e richiedono un click. Nome breve per i log. `None` = iframe sconosciuto:
-/// mai cliccare in quel caso.
+/// Player embed noti che tipicamente non si caricano da soli nel webview
+/// invisibile (lazy-load + challenge del provider). Nome breve per i log.
+/// `None` = iframe sconosciuto: mai navigare in quel caso.
 pub fn known_embed_player(iframe_src: &str) -> Option<&'static str> {
     let s = iframe_src.to_ascii_lowercase();
     if s.contains("player.vimeo.com") {
@@ -148,49 +148,38 @@ pub fn known_embed_player(iframe_src: &str) -> Option<&'static str> {
     }
 }
 
-/// Un click da fare: centro dell'iframe player (coordinate CSS viewport).
+/// Una navigazione da fare: l'URL dell'iframe player.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EmbedClick {
+pub struct EmbedNavigate {
     pub player: &'static str,
-    pub x: f64,
-    pub y: f64,
+    pub url: String,
 }
 
-/// Decide SE e DOVE cliccare su un player embed. Criteri conservativi:
-/// - solo se NESSUN candidato è stato catturato (il click serve solo ad avviare
-///   un player che non parte da solo)
-/// - mai prima di 8s dal load (il player potrebbe partire da solo)
-/// - massimo 3 click, distanziati almeno 7s
-/// - solo iframe di player noti con area sufficiente (>= 40x40)
-pub fn pick_embed_click(
+/// Decide SE navigare direttamente l'URL di un player embed. Criteri
+/// conservativi:
+/// - solo se NESSUN candidato è stato catturato (il navigate serve solo quando
+///   il player embed non si carica da solo)
+/// - mai prima di 8s dal load (potrebbe caricarsi da solo)
+/// - una sola volta per navigazione (il player top-level cattura e basta)
+/// - solo iframe di player noti (vimeo/youtube/dailymotion/wistia)
+pub fn pick_embed_navigate(
     candidates_captured: usize,
     since_nav: Option<Duration>,
-    last_click_age: Option<Duration>,
-    click_count: u32,
-    iframes: &[(String, f64, f64, f64, f64)], // (src, x, y, w, h)
-) -> Option<EmbedClick> {
-    if candidates_captured > 0 {
+    already_navigated: bool,
+    iframe_srcs: &[String],
+) -> Option<EmbedNavigate> {
+    if candidates_captured > 0 || already_navigated {
         return None;
     }
     let since = since_nav?;
     if since < Duration::from_secs(8) {
         return None;
     }
-    if click_count >= 3 {
-        return None;
-    }
-    if last_click_age.is_some_and(|a| a < Duration::from_secs(7)) {
-        return None;
-    }
-    for (src, x, y, w, h) in iframes {
-        if let Some(player) = known_embed_player(src)
-            && *w >= 40.0
-            && *h >= 40.0
-        {
-            return Some(EmbedClick {
+    for src in iframe_srcs {
+        if let Some(player) = known_embed_player(src) {
+            return Some(EmbedNavigate {
                 player,
-                x: x + w / 2.0,
-                y: y + h / 2.0,
+                url: src.clone(),
             });
         }
     }
@@ -502,107 +491,57 @@ mod tests {
         assert_eq!(known_embed_player(""), None);
     }
 
-    fn iframe(src: &str, x: f64, y: f64, w: f64, h: f64) -> (String, f64, f64, f64, f64) {
-        (src.to_string(), x, y, w, h)
+    fn iframe(src: &str) -> String {
+        src.to_string()
     }
 
     #[test]
-    fn embed_click_fires_on_player_iframe_center() {
-        let iframes = vec![iframe(
-            "https://player.vimeo.com/video/158963332",
-            200.0,
-            150.0,
-            640.0,
-            360.0,
-        )];
-        let c = pick_embed_click(0, Some(Duration::from_secs(10)), None, 0, &iframes)
-            .expect("click atteso");
+    fn embed_navigate_fires_on_player_iframe() {
+        let srcs = vec![iframe("https://player.vimeo.com/video/158963332?h=abc")];
+        let c = pick_embed_navigate(0, Some(Duration::from_secs(10)), false, &srcs)
+            .expect("navigazione attesa");
         assert_eq!(c.player, "vimeo");
-        assert_eq!((c.x, c.y), (520.0, 330.0)); // centro dell'iframe
+        assert_eq!(c.url, "https://player.vimeo.com/video/158963332?h=abc");
     }
 
     #[test]
-    fn embed_click_skipped_when_candidates_already_captured() {
-        let iframes = vec![iframe(
-            "https://player.vimeo.com/video/158963332",
-            200.0,
-            150.0,
-            640.0,
-            360.0,
-        )];
-        assert!(pick_embed_click(1, Some(Duration::from_secs(10)), None, 0, &iframes).is_none());
+    fn embed_navigate_skipped_when_candidates_already_captured() {
+        let srcs = vec![iframe("https://player.vimeo.com/video/1")];
+        assert!(pick_embed_navigate(1, Some(Duration::from_secs(10)), false, &srcs).is_none());
     }
 
     #[test]
-    fn embed_click_skipped_before_8s_from_load() {
-        let iframes = vec![iframe(
-            "https://player.vimeo.com/v/1",
-            0.0,
-            0.0,
-            640.0,
-            360.0,
-        )];
-        assert!(pick_embed_click(0, Some(Duration::from_secs(7)), None, 0, &iframes).is_none());
-        assert!(pick_embed_click(0, Some(Duration::from_secs(8)), None, 0, &iframes).is_some());
+    fn embed_navigate_skipped_before_8s_from_load() {
+        let srcs = vec![iframe("https://player.vimeo.com/video/1")];
+        assert!(pick_embed_navigate(0, Some(Duration::from_secs(7)), false, &srcs).is_none());
+        assert!(pick_embed_navigate(0, Some(Duration::from_secs(8)), false, &srcs).is_some());
         // nessun anchor di navigazione → mai
-        assert!(pick_embed_click(0, None, None, 0, &iframes).is_none());
+        assert!(pick_embed_navigate(0, None, false, &srcs).is_none());
     }
 
     #[test]
-    fn embed_click_capped_at_3_with_7s_spacing() {
-        let iframes = vec![iframe(
-            "https://player.vimeo.com/v/1",
-            0.0,
-            0.0,
-            640.0,
-            360.0,
-        )];
-        // max 3 click
-        assert!(pick_embed_click(0, Some(Duration::from_secs(30)), None, 3, &iframes).is_none());
-        // distanza minima 7s tra click
+    fn embed_navigate_once_per_page() {
+        let srcs = vec![iframe("https://player.vimeo.com/video/1")];
         assert!(
-            pick_embed_click(
-                0,
-                Some(Duration::from_secs(30)),
-                Some(Duration::from_secs(6)),
-                1,
-                &iframes
-            )
-            .is_none()
-        );
-        assert!(
-            pick_embed_click(
-                0,
-                Some(Duration::from_secs(30)),
-                Some(Duration::from_secs(7)),
-                1,
-                &iframes
-            )
-            .is_some()
+            pick_embed_navigate(0, Some(Duration::from_secs(30)), true, &srcs).is_none(),
+            "già navigato: mai una seconda volta"
         );
     }
 
     #[test]
-    fn embed_click_skips_unknown_or_tiny_iframes() {
-        // iframe non player: mai
-        let unknown = vec![iframe(
-            "https://partner.com/embed/x",
-            0.0,
-            0.0,
-            640.0,
-            360.0,
-        )];
-        assert!(pick_embed_click(0, Some(Duration::from_secs(10)), None, 0, &unknown).is_none());
-        // player noto ma troppo piccolo (fino a 4x sotto i 40px minimi)
-        let tiny = vec![iframe("https://player.vimeo.com/v/1", 0.0, 0.0, 30.0, 30.0)];
-        assert!(pick_embed_click(0, Some(Duration::from_secs(10)), None, 0, &tiny).is_none());
-        // il primo player noto valido vince in ordine
-        let two = vec![
-            iframe("https://player.qualcosa.com/x", 0.0, 0.0, 640.0, 360.0),
-            iframe("https://player.vimeo.com/v/1", 10.0, 10.0, 200.0, 100.0),
+    fn embed_navigate_skips_unknown_iframes() {
+        let srcs = vec![
+            iframe("https://partner.com/embed/x"),
+            iframe("https://player.qualcosa.com/v"),
         ];
-        let c = pick_embed_click(0, Some(Duration::from_secs(10)), None, 0, &two)
-            .expect("secondo iframe atteso");
-        assert_eq!((c.x, c.y), (110.0, 60.0));
+        assert!(pick_embed_navigate(0, Some(Duration::from_secs(10)), false, &srcs).is_none());
+        // il primo player noto vince in ordine
+        let two = vec![
+            iframe("https://player.qualcosa.com/x"),
+            iframe("https://www.youtube.com/embed/abc"),
+        ];
+        let c = pick_embed_navigate(0, Some(Duration::from_secs(10)), false, &two)
+            .expect("youtube atteso");
+        assert_eq!(c.player, "youtube");
     }
 }

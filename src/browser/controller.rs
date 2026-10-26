@@ -8,7 +8,7 @@
 //! - I comandi arrivano da un canale std mpsc, consumato a ogni giro di pump
 
 use super::sniff::{
-    CandidateSet, candidate_from_response_received, classify_dom, pick_embed_click,
+    CandidateSet, candidate_from_response_received, classify_dom, pick_embed_navigate,
 };
 use super::{BrowserCommand, BrowserEvent, BrowserHandle};
 use std::path::PathBuf;
@@ -23,18 +23,17 @@ use webview2_com::{
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM},
+        Foundation::{CloseHandle, HWND, LPARAM, RECT},
         System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
         System::Threading::{GetCurrentThreadId, OpenProcess, PROCESS_TERMINATE, TerminateProcess},
         UI::WindowsAndMessaging::{
-            DispatchMessageW, EnumChildWindows, GetClassNameW, GetClientRect,
-            GetWindowThreadProcessId, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE,
-            MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostMessageW, QS_ALLINPUT,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos, TranslateMessage, WM_LBUTTONDOWN,
-            WM_LBUTTONUP, WM_MOUSEMOVE,
+            DispatchMessageW, EnumChildWindows, GetClientRect, GetWindowThreadProcessId,
+            HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
+            PeekMessageW, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+            TranslateMessage,
         },
     },
-    core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR},
+    core::{HSTRING, Interface, PCWSTR, PWSTR},
 };
 
 /// Log diagnostico esteso (raw CDP, tick scout vuoti): rumore per l'uso normale.
@@ -238,73 +237,17 @@ const SCOUT_TICK_JS: &str = r#"
         });
     }
     collect(document);
-    // Player embed noti con area utile: candidati al click CDP (il video sta
-    // dentro un iframe cross-origin → invisibile al DOM scout; il click è
-    // l'unico modo per far partire il player)
+    // Player embed noti (vimeo/youtube/...): il video sta in un iframe
+    // cross-origin → invisibile al DOM scout e spesso non parte nemmeno al
+    // click nel webview invisibile. Il Rust navigherà DIRETTAMENTE l'URL
+    // dell'iframe (il player come pagina top-level carica e cattura bene).
     const PLAYER_IFRAME = /player\.vimeo\.com|youtube(-nocookie)?\.com\/embed|dailymotion\.com\/embed|fast\.wistia\.net\/embed/i;
-    const allowScroll = window.__lwAllowScroll !== false;
-    const vh = window.innerHeight;
     const iframes = [...document.querySelectorAll('iframe')]
-        .map(f => ({ el: f, src: (f.src || '').slice(0, 140), r: f.getBoundingClientRect() }))
-        .filter(f => PLAYER_IFRAME.test(f.src) && f.r.width >= 40 && f.r.height >= 40)
-        .map(f => {
-            const inViewport = f.r.y >= 0 && f.r.y + f.r.height <= vh;
-            if (!inViewport) {
-                // fuori viewport: il click CDP non arriverebbe — centralo (solo
-                // mentre lo scroll è permesso) e rimanda il click al prossimo tick
-                if (allowScroll) f.el.scrollIntoView({ block: 'center' });
-                return null;
-            }
-            return { src: f.src, x: Math.round(f.r.x), y: Math.round(f.r.y), w: Math.round(f.r.width), h: Math.round(f.r.height) };
-        })
-        .filter(Boolean);
+        .map(f => (f.src || '').slice(0, 300))
+        .filter(src => PLAYER_IFRAME.test(src));
     return JSON.stringify({ items: out, ad_active: adActive, iframes: iframes });
 })()
 "#;
-
-/// Trova l'hwnd della child WebView2 (classe `Chrome_WidgetWin_1`) del padre.
-extern "system" fn embed_child_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let mut buf = [0u16; 64];
-    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
-    let cls = String::from_utf16_lossy(&buf[..n as usize]);
-    if cls == "Chrome_WidgetWin_1" {
-        let out = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };
-        if out.is_none() {
-            *out = Some(hwnd);
-        }
-    }
-    true.into()
-}
-
-fn find_webview_child_hwnd(parent_hwnd: isize) -> Option<HWND> {
-    let mut found: Option<HWND> = None;
-    unsafe {
-        let _ = EnumChildWindows(
-            Some(HWND(parent_hwnd as *mut _)),
-            Some(embed_child_proc),
-            LPARAM(&mut found as *mut Option<HWND> as isize),
-        )
-        .ok();
-    }
-    found
-}
-
-/// Click mouse "trusted" dentro la webview embedded: PostMessage dei messaggi
-/// mouse alla HWND della webview — Chromium li processa come input reale e li
-/// inoltra anche agli iframe cross-origin (il click CDP non attraversa gli
-/// iframe out-of-process). Funziona anche con la finestra nascosta.
-fn dispatch_mouse_click(parent_hwnd: isize, x: i32, y: i32) {
-    let Some(child) = find_webview_child_hwnd(parent_hwnd) else {
-        eprintln!("[browser] embed click: webview child non trovata");
-        return;
-    };
-    let lparam = LPARAM((((y as u16 as usize) << 16) | (x as u16 as usize)) as isize);
-    unsafe {
-        let _ = PostMessageW(Some(child), WM_MOUSEMOVE, WPARAM(0), LPARAM(lparam.0));
-        let _ = PostMessageW(Some(child), WM_LBUTTONDOWN, WPARAM(1), LPARAM(lparam.0));
-        let _ = PostMessageW(Some(child), WM_LBUTTONUP, WPARAM(0), LPARAM(lparam.0));
-    }
-}
 
 /// Avvia il thread browser. `events` riceve candidati/URL/titolo/errori; il caller
 /// deve consumarlo (tipicamente un task dentro il componente Dioxus).
@@ -439,7 +382,12 @@ fn browser_thread(
         let mut client = RECT::default();
         let _ = GetClientRect(HWND(parent_hwnd as _), &mut client);
         let _ = controller.SetBounds(client);
-        push_browser_windows_below(parent_hwnd);
+        // DEBUG esperimento embed: browser visibile (non spinto sotto la UI)
+        if std::env::var("PLUCK_SHOW_BROWSER").as_deref() == Ok("1") {
+            eprintln!("[browser] DEBUG: browser visibile (PLUCK_SHOW_BROWSER=1)");
+        } else {
+            push_browser_windows_below(parent_hwnd);
+        }
 
         let Ok(webview) = controller.CoreWebView2() else {
             eprintln!("[browser] ERRORE: CoreWebView2 assente");
@@ -553,17 +501,13 @@ fn browser_thread(
         // NavigationCompleted) spesso ritorna vuoto (overlay ad nel DOM) — i tick
         // scout riprovano a ogni secondo finché il titolo non esiste
         let title_sent = std::rc::Rc::new(std::cell::Cell::new(false));
-        // Auto-click player embed: ultimo click + conteggio (reset a navigazione).
-        // Il click via CDP è l'unico input che attraversa gli iframe cross-origin.
-        let embed_last_click =
-            std::rc::Rc::new(std::cell::Cell::new(Option::<std::time::Instant>::None));
-        let embed_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
-        let embed_reset = embed_last_click.clone();
-        let embed_reset_count = embed_count.clone();
+        // Navigazione embed già fatta per la pagina corrente (reset a navigazione):
+        // una sola volta — il player top-level cattura e basta
+        let embed_navigated = std::rc::Rc::new(std::cell::Cell::new(false));
+        let embed_reset = embed_navigated.clone();
         let scout_tick_events = events.clone();
         let scout_tick_candidates = candidates.clone();
-        let embed_tick_last = embed_last_click.clone();
-        let embed_tick_count = embed_count.clone();
+        let embed_tick_navigated = embed_navigated.clone();
         let _ = webview.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new({
                 let scout_deadline = scout_deadline.clone();
@@ -624,8 +568,7 @@ fn browser_thread(
                     ));
                     scout_since.set(Some(std::time::Instant::now()));
                     ad_notified.set(false);
-                    embed_reset.set(None);
-                    embed_reset_count.set(0);
+                    embed_reset.set(false);
                     Ok(())
                 }
             })),
@@ -805,8 +748,7 @@ fn browser_thread(
                     let scout_nav_completed = nav_completed.clone();
                     let scout_title_sent = title_sent.clone();
                     let tick_webview = webview.clone();
-                    let embed_last = embed_tick_last.clone();
-                    let embed_n = embed_tick_count.clone();
+                    let embed_navigated = embed_tick_navigated.clone();
                     let _ = webview.ExecuteScript(
                         &HSTRING::from(SCOUT_TICK_JS),
                         &ExecuteScriptCompletedHandler::create(Box::new(
@@ -860,61 +802,54 @@ fn browser_thread(
                                         }
                                     }
                                 }
-                                // Player embed noti (vimeo/youtube/...): senza
-                                // candidati, il click CDP al centro dell'iframe è
-                                // l'unico input che attraversa il cross-origin e
-                                // fa partire il player
-                                let mut embed_iframes: Vec<(String, f64, f64, f64, f64)> =
-                                    Vec::new();
+                                // Player embed noti (vimeo/youtube/...): il video
+                                // sta in un iframe cross-origin che nel webview
+                                // invisibile spesso non si carica mai (challenge
+                                // del provider, lazy-load del CMS). Navigare
+                                // direttamente l'URL dell'iframe: come pagina
+                                // top-level il player si carica e cattura
+                                let mut embed_iframes: Vec<String> = Vec::new();
                                 if let Some(arr) = parsed["iframes"].as_array() {
                                     for f in arr {
-                                        if let (Some(src), Some(x), Some(y), Some(w), Some(h)) = (
-                                            f["src"].as_str(),
-                                            f["x"].as_f64(),
-                                            f["y"].as_f64(),
-                                            f["w"].as_f64(),
-                                            f["h"].as_f64(),
-                                        ) {
-                                            embed_iframes.push((src.to_string(), x, y, w, h));
+                                        if let Some(src) = f.as_str() {
+                                            embed_iframes.push(src.to_string());
                                         }
                                     }
                                 }
-                                let now2 = std::time::Instant::now();
-                                let since_nav = scout_since.get().map(|t| now2.duration_since(t));
-                                let last_age = embed_last.get().map(|t| now2.duration_since(t));
-                                if let Some(click) = pick_embed_click(
+                                let since_nav = scout_since
+                                    .get()
+                                    .map(|t| std::time::Instant::now().duration_since(t));
+                                if let Some(nav) = pick_embed_navigate(
                                     scout_candidates.borrow().len(),
                                     since_nav,
-                                    last_age,
-                                    embed_n.get(),
+                                    embed_navigated.get(),
                                     &embed_iframes,
                                 ) {
                                     eprintln!(
-                                        "[browser] player embed ({}) inattivo: click CDP a ({:.0},{:.0}) ({}/3)",
-                                        click.player,
-                                        click.x,
-                                        click.y,
-                                        embed_n.get() + 1
+                                        "[browser] player embed ({}) non caricato: navigo l'iframe",
+                                        nav.player
                                     );
-                                    dispatch_mouse_click(parent_hwnd, click.x as i32, click.y as i32);
-                                    embed_last.set(Some(now2));
-                                    embed_n.set(embed_n.get() + 1);
-                                    // il player parte dopo il click: rinnova lo scout
-                                    scout_deadline.set(Some(
-                                        now2 + std::time::Duration::from_secs(20),
-                                    ));
+                                    embed_navigated.set(true);
+                                    let url_json =
+                                        serde_json::to_string(&nav.url).unwrap_or_default();
+                                    let _ = tick_webview.ExecuteScript(
+                                        &HSTRING::from(&format!(
+                                            "location.assign({url_json}); 'nav'"
+                                        )),
+                                        &ExecuteScriptCompletedHandler::create(Box::new(|_, _| {
+                                            Ok(())
+                                        })),
+                                    );
                                 }
                                 // Auto-scroll (lazy-load) solo finché nessun
-                                // candidato e nessun click embed in corso
+                                // candidato e nessuna navigazione embed in corso
                                 let allow_scroll =
-                                    scout_candidates.borrow().is_empty() && embed_n.get() == 0;
+                                    scout_candidates.borrow().is_empty() && !embed_navigated.get();
                                 let _ = tick_webview.ExecuteScript(
                                     &HSTRING::from(&format!(
                                         "window.__lwAllowScroll = {allow_scroll}"
                                     )),
-                                    &ExecuteScriptCompletedHandler::create(Box::new(
-                                        |_, _| Ok(()),
-                                    )),
+                                    &ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(()))),
                                 );
                                 // Pubblicità attiva: estendi la finestra scout (cap 90s
                                 // dalla navigazione) e segnala all'UI il tentativo in
