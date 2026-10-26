@@ -37,6 +37,7 @@ fn launch_download(
     dest: PathBuf,
     thumbnail: Option<String>,
     is_hls: bool,
+    audio_url: Option<String>,
 ) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
@@ -52,10 +53,19 @@ fn launch_download(
         thumbnail,
         is_hls,
     });
-    // HLS: ffmpeg (sidecar) scarica i segmenti e remuxa in MP4; engine normale
-    // altrimenti (range HTTP con pausa/ripresa)
+    // HLS: ffmpeg (sidecar) scarica i segmenti e remuxa in MP4; bytestream
+    // Instagram: video+audio separati scaricati e muxati con ffmpeg; engine
+    // normale altrimenti (range HTTP con pausa/ripresa)
     let ctl = if is_hls {
         spawn_hls_download(id, url, referer.clone(), dest, tx)
+    } else if let Some(audio) = &audio_url {
+        crate::download::bytestream::spawn_bytestream_mux_download(
+            id,
+            url,
+            Some(audio.clone()),
+            dest,
+            tx,
+        )
     } else {
         spawn_download(id, url, referer.clone(), dest, tx)
     };
@@ -112,12 +122,13 @@ pub fn App() -> Element {
 
     // Chiusure submit: cloni tx per consumer (le props vogliono FnMut)
     let tx_auto = tx.clone();
-    let auto_on_download = move |(url, referer, dest, thumbnail, is_stream): (
+    let auto_on_download = move |(url, referer, dest, thumbnail, is_stream, audio_url): (
         String,
         Option<String>,
         PathBuf,
         Option<String>,
         bool,
+        Option<String>,
     )| {
         launch_download(
             tx_auto.clone(),
@@ -129,6 +140,7 @@ pub fn App() -> Element {
             dest,
             thumbnail,
             is_stream,
+            audio_url,
         );
     };
     let tx_manual = tx.clone();
@@ -143,6 +155,7 @@ pub fn App() -> Element {
             dest,
             None, // download manuale: nessuna thumbnail
             false,
+            None, // download manuale: nessuna traccia audio separata
         );
         dialog_open.set(false);
     };

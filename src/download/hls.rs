@@ -287,7 +287,7 @@ fn ffmpeg_dir() -> PathBuf {
 
 /// Risolve il binario ffmpeg: cache nostra → già installato (PATH o accanto
 /// all'exe) → scarica una tantum nella cache, con progresso sul canale.
-async fn ensure_ffmpeg(
+pub(crate) async fn ensure_ffmpeg(
     tx: &mpsc::Sender<ProgressMessage>,
     id: DownloadId,
 ) -> Result<PathBuf, String> {

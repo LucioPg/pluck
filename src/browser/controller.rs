@@ -8,9 +8,11 @@
 //! - I comandi arrivano da un canale std mpsc, consumato a ogni giro di pump
 
 use super::sniff::{
-    CandidateSet, candidate_from_response_received, classify_dom, pick_embed_navigate,
+    CandidateSet, InstaPairing, candidate_from_response_received, classify_dom,
+    classify_insta_bytestream, pick_embed_navigate,
 };
-use super::{BrowserCommand, BrowserEvent, BrowserHandle};
+use super::{BrowserCommand, BrowserEvent, BrowserHandle, MediaCandidate};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedSender;
 use webview2_com::{
@@ -450,6 +452,10 @@ fn browser_thread(
         // Dedup CONDIVISO tra scout DOM e CDP (possono vedere lo stesso URL):
         // creato PRIMA delle registrazioni che lo catturano
         let candidates = std::rc::Rc::new(std::cell::RefCell::new(CandidateSet::new(500)));
+        // Accoppiamento bytestream Instagram: le tracce video/audio in arrivo
+        // dal CDP si aggregano qui per asset; il flush avviene ai tick scout
+        let insta_pairs: std::rc::Rc<std::cell::RefCell<HashMap<String, InstaPairing>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()));
         // Thumbnail di pagina corrente (og:image/twitter:image/poster): estratta a
         // ogni NavigationCompleted, attaccata come fallback ai candidati CDP (che
         // non hanno contesto DOM). Reset a ogni navigazione (exec).
@@ -623,6 +629,7 @@ fn browser_thread(
             let cdp_capture = capture_deadline.clone();
             let cdp_ad_active = ad_active_now.clone();
             let cdp_nav_completed = nav_completed.clone();
+            let cdp_pairs = insta_pairs.clone();
             let _ = receiver.add_DevToolsProtocolEventReceived(
                 &DevToolsProtocolEventReceivedEventHandler::create(Box::new(
                     move |_webview, args| {
@@ -632,6 +639,62 @@ fn browser_thread(
                                 let json = take_pwstr(json);
                                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
                                 {
+                                    let raw_url = value["response"]["url"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    // Bytestream Instagram: video/audio in tracce
+                                    // separate con range request → normalizza e
+                                    // accoppia per asset; il flush avviene ai tick
+                                    if let Some(track) = classify_insta_bytestream(&raw_url) {
+                                        let now = std::time::Instant::now();
+                                        let emit = {
+                                            let mut pairs = cdp_pairs.borrow_mut();
+                                            let pair = pairs
+                                                .entry(track.asset_id.clone())
+                                                .or_default();
+                                            pair.update(&track, now);
+                                            if let Some((v, a)) =
+                                                pair.ready_to_flush(now, std::time::Duration::from_secs(6))
+                                            {
+                                                pair.flushed = true;
+                                                Some((v, a))
+                                            } else {
+                                                None
+                                            }
+                                        };
+                                        if let Some((video_url, audio_url)) = emit {
+                                            let mut candidate =
+                                                MediaCandidate::new(video_url, false, true);
+                                            candidate.name = "Instagram reel".into();
+                                            candidate.audio_url = audio_url;
+                                            if candidate.thumbnail.is_none()
+                                                && let Some(t) = cdp_page_thumb.borrow().clone()
+                                            {
+                                                candidate.thumbnail = Some(t);
+                                            }
+                                            if cdp_candidates.borrow_mut().insert(&candidate) {
+                                                eprintln!(
+                                                    "[browser] candidato: {} (stream=false, insta-mux={})",
+                                                    candidate.url,
+                                                    candidate.audio_url.is_some()
+                                                );
+                                                let _ = cdp_events
+                                                    .send(BrowserEvent::Candidate(candidate));
+                                                if cdp_nav_completed.get()
+                                                    && !cdp_ad_active.get()
+                                                {
+                                                    cdp_capture.set(Some(
+                                                        std::time::Instant::now()
+                                                            + CAPTURE_GRACE,
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        return Ok(());
+                                    }
+
                                     if verbose_logs()
                                         && let Some(url) = value["response"]["url"]
                                             .as_str()
@@ -760,6 +823,8 @@ fn browser_thread(
                     let scout_title_sent = title_sent.clone();
                     let tick_webview = webview.clone();
                     let embed_navigated = embed_tick_navigated.clone();
+                    let tick_pairs = insta_pairs.clone();
+                    let tick_page_thumb = page_thumb.clone();
                     let suppress_tick = suppress_page_url.clone();
                     let _ = webview.ExecuteScript(
                         &HSTRING::from(SCOUT_TICK_JS),
@@ -864,6 +929,47 @@ fn browser_thread(
                                     )),
                                     &ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(()))),
                                 );
+                                // Flush coppie bytestream Instagram pronte
+                                // (entrambe le tracce: mux; singola: come arriva)
+                                let flushed = {
+                                    let mut pairs = tick_pairs.borrow_mut();
+                                    let now = std::time::Instant::now();
+                                    let mut ready: Vec<(String, Option<String>)> = Vec::new();
+                                    for pair in pairs.values_mut() {
+                                        if let Some((v, a)) = pair
+                                            .ready_to_flush(now, std::time::Duration::from_secs(6))
+                                        {
+                                            pair.flushed = true;
+                                            ready.push((v, a));
+                                        }
+                                    }
+                                    ready
+                                };
+                                for (video_url, audio_url) in flushed {
+                                    let mut candidate =
+                                        MediaCandidate::new(video_url.clone(), false, true);
+                                    candidate.name = "Instagram reel".into();
+                                    candidate.audio_url = audio_url;
+                                    if candidate.thumbnail.is_none()
+                                        && let Some(t) = tick_page_thumb.borrow().clone()
+                                    {
+                                        candidate.thumbnail = Some(t);
+                                    }
+                                    if scout_candidates.borrow_mut().insert(&candidate) {
+                                        eprintln!(
+                                            "[browser] candidato: {} (stream=false, insta-mux={})",
+                                            candidate.url,
+                                            candidate.audio_url.is_some()
+                                        );
+                                        let _ =
+                                            scout_events.send(BrowserEvent::Candidate(candidate));
+                                        if scout_nav_completed.get() && !scout_ad_active.get() {
+                                            scout_capture.set(Some(
+                                                std::time::Instant::now() + CAPTURE_GRACE,
+                                            ));
+                                        }
+                                    }
+                                }
                                 // Pubblicità attiva: estendi la finestra scout (cap 90s
                                 // dalla navigazione) e segnala all'UI il tentativo in
                                 // corso. Mentre l'ad gira: niente chiusura post-cattura

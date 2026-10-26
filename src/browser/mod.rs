@@ -22,6 +22,9 @@ pub struct MediaCandidate {
     /// Thumbnail: poster del `<video>`/img dell'anchor (scout) o thumb di
     /// pagina (og:image, fallback per i candidati CDP)
     pub thumbnail: Option<String>,
+    /// Traccia audio separata (bytestream Instagram): se presente, il download
+    /// scarica url (video) + audio_url e li muxa in MP4 con ffmpeg
+    pub audio_url: Option<String>,
 }
 
 impl MediaCandidate {
@@ -33,6 +36,7 @@ impl MediaCandidate {
             is_stream,
             url,
             thumbnail: None,
+            audio_url: None,
         }
     }
 }

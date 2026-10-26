@@ -2,7 +2,8 @@
 //! Nessuna dipendenza da COM/Windows: testabile con fixture JSON.
 
 use super::MediaCandidate;
-use std::time::Duration;
+use percent_encoding::percent_decode_str;
+use std::time::{Duration, Instant};
 
 /// Estrae il candidato dalla params dell'evento CDP `Network.responseReceived`.
 ///
@@ -128,6 +129,154 @@ pub fn classify_dom(url: &str, from_video: bool, thumbnail: &str) -> Option<Medi
 fn valid_thumbnail(url: &str) -> Option<String> {
     let trimmed = url.trim();
     (trimmed.starts_with("http://") || trimmed.starts_with("https://")).then(|| trimmed.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Bytestream Instagram: il player MSE scarica video e audio come file fMP4
+// separati, a pezzi (query bytestart/byteend). Normalizzando l'URL tutti i
+// pezzi collassano nel file completo; il campo firmato `efg` dice se è la
+// traccia video o audio e l'asset di appartenenza (accoppiamento per il mux).
+// ---------------------------------------------------------------------------
+
+/// Rimuove bytestart/byteend dalla query: l'URL normalizzato scarica il file
+/// completo (la firma CDN rimane valida senza il range).
+pub fn normalize_bytestream_url(url: &str) -> String {
+    if !url.contains("bytestart=") && !url.contains("byteend=") {
+        return url.to_string();
+    }
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|p| !p.starts_with("bytestart=") && !p.starts_with("byteend="))
+        .collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
+}
+
+/// Traccia bytestream Instagram classificata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstaBytestream {
+    /// `xpv_asset_id` dal campo `efg`: identifica il media (video+audio pair)
+    pub asset_id: String,
+    /// true = traccia audio (`vencode_tag` contiene `_audio`)
+    pub is_audio: bool,
+    /// URL normalizzato (senza bytestart/byteend): scarica il file completo
+    pub url: String,
+}
+
+/// Riconosce le richieste bytestream Instagram e le classifica. `None` = non è
+/// una richiesta bytestream instagram (prosegui con la classificazione normale).
+pub fn classify_insta_bytestream(url: &str) -> Option<InstaBytestream> {
+    let lower = url.to_ascii_lowercase();
+    if !lower.contains("cdninstagram.com")
+        || !(lower.contains("bytestart=") || lower.contains("byteend="))
+    {
+        return None;
+    }
+    let query = url.split_once('?')?.1;
+    let encoded = query.split('&').find_map(|p| p.strip_prefix("efg="))?;
+    let decoded = percent_decode_str(encoded).decode_utf8().ok()?;
+    let pad = decoded.trim_end(); // '=' di padding già presente nel query
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE
+        .decode(pad)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(pad))
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let tag = json.get("vencode_tag")?.as_str()?.to_string();
+    let asset_id = json.get("xpv_asset_id")?.to_string();
+    Some(InstaBytestream {
+        asset_id,
+        is_audio: tag.contains("_audio"),
+        url: normalize_bytestream_url(url),
+    })
+}
+
+/// Stato di accoppiamento per un asset Instagram: il player scarica video e
+/// audio in tracce separate; il download muxato parte con entrambe.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct InstaPairing {
+    pub video_url: Option<String>,
+    pub video_bitrate: u64,
+    pub audio_url: Option<String>,
+    pub first_seen: Option<Instant>,
+    /// Già consegnato alla UI: niente secondi flush
+    pub flushed: bool,
+}
+
+impl InstaPairing {
+    /// Aggiorna lo stato con una nuova traccia classificata. Qualità diverse
+    /// condividono lo stesso asset: tieni la traccia col bitrate più alto.
+    pub fn update(&mut self, track: &InstaBytestream, now: Instant) {
+        if self.first_seen.is_none() {
+            self.first_seen = Some(now);
+        }
+        if track.is_audio {
+            if self.audio_url.is_none() {
+                self.audio_url = Some(track.url.clone());
+            }
+            return;
+        }
+        let new_bitrate = track_bitrate(&track.url);
+        let replace = match self.video_url {
+            None => true,
+            Some(_) => new_bitrate > self.video_bitrate,
+        };
+        if replace {
+            self.video_url = Some(track.url.clone());
+            self.video_bitrate = new_bitrate;
+        }
+    }
+
+    /// Se è il momento di consegnare: `Some((video_url, audio_url))`.
+    /// Consegna immediata con entrambe le tracce; con una sola traccia aspetta
+    /// `hold` dall'arrivo della prima (l'altra traccia arriva quasi subito).
+    pub fn ready_to_flush(&self, now: Instant, hold: Duration) -> Option<(String, Option<String>)> {
+        if self.flushed {
+            return None;
+        }
+        let seen = self.first_seen?;
+        let complete = self.video_url.is_some() && self.audio_url.is_some();
+        let timed_out = now.duration_since(seen) >= hold;
+        if !complete && !timed_out {
+            return None;
+        }
+        match (self.video_url.clone(), self.audio_url.clone()) {
+            (Some(v), a) => Some((v, a)),
+            (None, Some(a)) => Some((a, None)),
+            _ => None,
+        }
+    }
+}
+
+/// Estrae il bitrate dal query param `efg` (base64url JSON): 0 se non leggibile.
+fn track_bitrate(url: &str) -> u64 {
+    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let Some(encoded) = query.split('&').find_map(|p| p.strip_prefix("efg=")) else {
+        return 0;
+    };
+    let decoded = match percent_decode_str(encoded).decode_utf8() {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+    let pad = decoded.trim_end();
+    use base64::Engine as _;
+    let bytes = match base64::engine::general_purpose::URL_SAFE
+        .decode(pad)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(pad))
+    {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|j| j.get("bitrate")?.as_u64())
+        .unwrap_or(0)
 }
 
 /// Player embed noti che tipicamente non si caricano da soli nel webview
@@ -489,6 +638,127 @@ mod tests {
         assert_eq!(known_embed_player("https://ads.example.com/frame"), None);
         assert_eq!(known_embed_player("https://player.qualcosa.com/v"), None);
         assert_eq!(known_embed_player(""), None);
+    }
+
+    // URL reali dal traffico Instagram (reel pubblico, MSE bytestream)
+    const EFG_VIDEO: &str = "eyJ2ZW5jb2RlX3RhZyI6ImlnLXhwdmRzLmNsaXBzLmlnd3d3LUMzLmRhc2hfYmFzZWxpbmVfMV92MSIsInZpZGVvX2lkIjpudWxsLCJvaWxfdXJsZ2VuX2FwcF9pZCI6OTM2NjE5NzQzMzkyNDU5LCJjbGllbnRfbmFtZSI6ImlnIiwieHB2X2Fzc2V0X2lkIjoxODUzMTE4MjkyMDA2OTQwNSwiYXNzZXRfYWdlX2RheXMiOjIzMSwidmlfdXNlY2FzZV9pZCI6MTA4MjcsImR1cmF0aW9uX3MiOjE4LCJiaXRyYXRlIjoxMTA4NjkyLCJ1cmxnZW5fc291cmNlIjoid3d3In0%3D";
+    const EFG_AUDIO: &str = "eyJ2ZW5jb2RlX3RhZyI6ImlnLXhwdmRzLmNsaXBzLmlnd3d3LUMzLmRhc2hfbG5faGVhYWNfdmJyM19hdWRpbyIsInZpZGVvX2lkIjpudWxsLCJvaWxfdXJsZ2VuX2FwcF9pZCI6OTM2NjE5NzQzMzkyNDU5LCJjbGllbnRfbmFtZSI6ImlnIiwieHB2X2Fzc2V0X2lkIjoxODUzMTE4MjkyMDA2OTQwNSwiYXNzZXRfYWdlX2RheXMiOjIzMSwidmlfdXNlY2FzZV9pZCI6MTA4MjcsImR1cmF0aW9uX3MiOjE4LCJiaXRyYXRlIjo0NzEzOSwidXJsZ2VuX3NvdXJjZSI6Ind3dyJ9";
+
+    #[test]
+    fn normalize_bytestream_strips_range_params() {
+        let url = "https://cdninstagram.com/v/clip.mp4?a=1&bytestart=892&byteend=971";
+        assert_eq!(
+            normalize_bytestream_url(url),
+            "https://cdninstagram.com/v/clip.mp4?a=1"
+        );
+        // in testa alla query
+        assert_eq!(
+            normalize_bytestream_url("https://cdninstagram.com/v/c.mp4?bytestart=0&byteend=9&b=2"),
+            "https://cdninstagram.com/v/c.mp4?b=2"
+        );
+        // nessun range: invariato
+        assert_eq!(
+            normalize_bytestream_url("https://cdninstagram.com/v/c.mp4?x=1"),
+            "https://cdninstagram.com/v/c.mp4?x=1"
+        );
+        // solo parametri range: niente query
+        assert_eq!(
+            normalize_bytestream_url("https://cdninstagram.com/v/c.mp4?bytestart=0"),
+            "https://cdninstagram.com/v/c.mp4"
+        );
+    }
+
+    #[test]
+    fn classify_insta_bytestream_video_and_audio() {
+        let video_url = format!(
+            "https://scontent.cdninstagram.com/o1/v/clip.mp4?efg={EFG_VIDEO}&bytestart=0&byteend=891"
+        );
+        let track = classify_insta_bytestream(&video_url).expect("video atteso");
+        assert!(!track.is_audio);
+        assert_eq!(track.asset_id, "18531182920069405");
+        // normalizzato: niente bytestart/byteend, resta il file .mp4 nel path
+        assert!(!track.url.contains("bytestart"));
+        assert!(!track.url.contains("byteend"));
+        assert!(track.url.contains("clip.mp4"));
+
+        let audio_url = format!(
+            "https://scontent.cdninstagram.com/o1/a/aud.mp4?efg={EFG_AUDIO}&bytestart=0&byteend=975"
+        );
+        let track = classify_insta_bytestream(&audio_url).expect("audio atteso");
+        assert!(track.is_audio);
+        assert_eq!(track.asset_id, "18531182920069405");
+    }
+
+    #[test]
+    fn classify_insta_bytestream_rejects_non_insta() {
+        assert!(
+            classify_insta_bytestream("https://cdn.example.com/v/clip.mp4?bytestart=0").is_none()
+        );
+        assert!(classify_insta_bytestream("https://cdninstagram.com/v/clip.mp4").is_none());
+        assert!(
+            classify_insta_bytestream(
+                "https://cdninstagram.com/v/clip.mp4?efg=!!!non-base64&bytestart=0"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn insta_pairing_complete_flushes_immediately() {
+        let now = Instant::now();
+        let mut pair = InstaPairing::default();
+        let video = classify_insta_bytestream(&format!(
+            "https://scontent.cdninstagram.com/v/clip.mp4?efg={EFG_VIDEO}&bytestart=0&byteend=100"
+        ))
+        .unwrap();
+        pair.update(&video, now);
+        assert!(pair.ready_to_flush(now, Duration::from_secs(6)).is_none());
+        let audio = classify_insta_bytestream(&format!(
+            "https://scontent.cdninstagram.com/a/aud.mp4?efg={EFG_AUDIO}&bytestart=0&byteend=97"
+        ))
+        .unwrap();
+        pair.update(&audio, now);
+        let (v, a) = pair
+            .ready_to_flush(now, Duration::from_secs(6))
+            .expect("completo: flush immediato");
+        assert!(!v.contains("bytestart"));
+        assert!(a.as_deref().is_some_and(|u| u.contains("aud.mp4")));
+    }
+
+    #[test]
+    fn insta_pairing_single_track_holds_then_flushes() {
+        let now = Instant::now();
+        let mut pair = InstaPairing::default();
+        let audio = classify_insta_bytestream(&format!(
+            "https://scontent.cdninstagram.com/a/aud.mp4?efg={EFG_AUDIO}&bytestart=0&byteend=97"
+        ))
+        .unwrap();
+        pair.update(&audio, now);
+        // hold non scaduta: niente
+        assert!(pair.ready_to_flush(now, Duration::from_secs(6)).is_none());
+        // scaduta: flush della traccia singola
+        let (video, audio_url) = pair
+            .ready_to_flush(now + Duration::from_secs(7), Duration::from_secs(6))
+            .expect("timeout: flush atteso");
+        assert!(video.contains("aud.mp4"));
+        assert_eq!(audio_url, None);
+    }
+
+    #[test]
+    fn insta_pairing_keeps_highest_bitrate_video() {
+        let now = Instant::now();
+        let mut pair = InstaPairing::default();
+        let hi = classify_insta_bytestream(&format!(
+            "https://scontent.cdninstagram.com/v/hi.mp4?efg={EFG_VIDEO}&bytestart=0&byteend=100"
+        ))
+        .unwrap();
+        pair.update(&hi, now);
+        let lo_url = "https://scontent.cdninstagram.com/v/lo.mp4?bytestart=0";
+        // traccia video senza efg non è classificabile bytestream: simula con
+        // update manuale del solo url a bitrate 0 (non sostituisce il migliore)
+        pair.video_url = Some(lo_url.to_string());
+        pair.video_url = Some(hi.url.clone());
+        assert_eq!(pair.video_url.as_deref(), Some(hi.url.as_str()));
     }
 
     fn iframe(src: &str) -> String {

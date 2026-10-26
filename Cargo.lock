@@ -3845,6 +3845,7 @@ name = "pluck"
 version = "0.2.6"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "dioxus",
  "dirs",
  "ffmpeg-sidecar",
