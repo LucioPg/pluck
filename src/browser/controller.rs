@@ -455,6 +455,10 @@ fn browser_thread(
         // non hanno contesto DOM). Reset a ogni navigazione (exec).
         let page_thumb: std::rc::Rc<std::cell::RefCell<Option<String>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
+        // Sopprimi PageUrl durante la navigazione automatica agli embed: la barra
+        // indirizzo deve restare con l'URL inserito dall'utente, non col player
+        let suppress_page_url = std::rc::Rc::new(std::cell::Cell::new(false));
+        let suppress_src = suppress_page_url.clone();
         let _ = webview.add_SourceChanged(
             &SourceChangedEventHandler::create(Box::new(move |webview, _args| {
                 if let Some(webview) = webview {
@@ -462,7 +466,9 @@ fn browser_thread(
                     if webview.Source(&mut uri).is_ok() {
                         let url = take_pwstr(uri);
                         eprintln!("[browser] SourceChanged: {url}");
-                        let _ = url_events.send(BrowserEvent::PageUrl(url));
+                        if !suppress_src.get() {
+                            let _ = url_events.send(BrowserEvent::PageUrl(url));
+                        }
                     }
                 }
                 Ok(())
@@ -696,6 +702,11 @@ fn browser_thread(
                     return;
                 }
                 eprintln!("[browser] comando ricevuto");
+                // Navigazione richiesta dall'utente: la barra indirizzo torna
+                // a seguire le pagine (il suppress era per gli embed automatici)
+                if matches!(cmd, BrowserCommand::Navigate(_)) {
+                    suppress_page_url.set(false);
+                }
                 exec(
                     &controller,
                     &webview,
@@ -749,6 +760,7 @@ fn browser_thread(
                     let scout_title_sent = title_sent.clone();
                     let tick_webview = webview.clone();
                     let embed_navigated = embed_tick_navigated.clone();
+                    let suppress_tick = suppress_page_url.clone();
                     let _ = webview.ExecuteScript(
                         &HSTRING::from(SCOUT_TICK_JS),
                         &ExecuteScriptCompletedHandler::create(Box::new(
@@ -830,6 +842,7 @@ fn browser_thread(
                                         nav.player
                                     );
                                     embed_navigated.set(true);
+                                    suppress_tick.set(true);
                                     let url_json =
                                         serde_json::to_string(&nav.url).unwrap_or_default();
                                     let _ = tick_webview.ExecuteScript(
