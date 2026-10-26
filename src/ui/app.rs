@@ -2,6 +2,7 @@ use crate::download::engine::spawn_download;
 use crate::download::hls::spawn_hls_download;
 use crate::download::types::*;
 use crate::referers::RefererStore;
+use dioxus::desktop::use_muda_event_handler;
 use dioxus::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -146,54 +147,46 @@ pub fn App() -> Element {
         dialog_open.set(false);
     };
 
-    // Privacy: alla chiusura della finestra → shutdown browser (rilascio lock
-    // profilo) + cancellazione della cartella profilo (cookie/login/cache non
-    // persistono su disco). Retry: il processo browser può rilasciare i file
-    // qualche centinaio di ms dopo il Close().
-    {
-        let dx = dioxus::desktop::window();
-        let cleanup_done = std::rc::Rc::new(std::cell::Cell::new(false));
-        let flag = cleanup_done.clone();
-        dx.create_wry_event_handler(move |event, _| {
-            if !matches!(
-                event,
-                dioxus::desktop::tao::event::Event::WindowEvent {
-                    event: dioxus::desktop::tao::event::WindowEvent::CloseRequested { .. },
-                    ..
-                }
-            ) || flag.get()
-            {
-                return;
-            }
-            flag.set(true);
-            eprintln!("[exit] chiusura: shutdown browser + cancellazione profilo");
-            if let Some(handle) = crate::browser::shared_browser()
-                && !handle.shutdown_and_wait(std::time::Duration::from_secs(3))
-            {
-                eprintln!("[exit] ack shutdown non arrivato (timeout): procedo comunque");
-            }
-            let profile = crate::browser::profile_dir();
-            for attempt in 0..5 {
-                match std::fs::remove_dir_all(&profile) {
-                    Ok(()) => {
-                        eprintln!("[exit] profilo cancellato ({})", profile.display());
-                        // Rimuovi anche la cartella padre se rimasta vuota
-                        if let Some(parent) = profile.parent() {
-                            let _ = std::fs::remove_dir(parent);
-                        }
-                        return;
-                    }
-                    Err(e) if attempt < 4 => {
-                        eprintln!("[exit] cancellazione ritentata ({e})");
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                    }
-                    Err(e) => {
-                        eprintln!("[exit] ERRORE: profilo non cancellato: {e}");
-                    }
-                }
-            }
-        });
-    }
+    // System tray: icona + menu (Apri / Esci). Init una tantum sul main thread
+    // (pattern PWDManager). La X nasconde la finestra (WindowCloseBehaviour::
+    // WindowHides in main.rs): l'uscita vera è solo dal menu.
+    use_hook(|| {
+        use dioxus::desktop::trayicon;
+        let menu = trayicon::menu::Menu::new();
+        menu.append(&trayicon::menu::MenuItem::with_id(
+            "open",
+            "Apri ldwhelper",
+            true,
+            None,
+        ))
+        .unwrap();
+        menu.append(&trayicon::menu::PredefinedMenuItem::separator())
+            .unwrap();
+        menu.append(&trayicon::menu::MenuItem::with_id(
+            "quit", "Esci", true, None,
+        ))
+        .unwrap();
+        let img =
+            image::load_from_memory(include_bytes!("../../assets/icon.ico")).expect("icona tray");
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let icon = trayicon::Icon::from_rgba(rgba.into_raw(), w, h).expect("icona tray rgba");
+        trayicon::init_tray_icon(menu, Some(icon));
+    });
+
+    // Eventi menu tray: use_muda_event_handler è l'unico dispatch funzionante
+    // (dioxus consuma la OnceCell di muda::MenuEvent durante l'init — KB dioxus)
+    use_muda_event_handler(move |event| {
+        if event.id() == "open" {
+            let dx = dioxus::desktop::window();
+            dx.window.set_visible(true);
+            dx.window.set_focus();
+        } else if event.id() == "quit" {
+            eprintln!("[exit] uscita dal menu tray: shutdown browser + cancellazione profilo");
+            crate::browser::shutdown_and_cleanup_profile();
+            std::process::exit(0);
+        }
+    });
 
     rsx! {
         head { style { "{TAILWIND_CSS}" } }

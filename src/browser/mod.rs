@@ -261,6 +261,39 @@ pub fn profile_dir() -> PathBuf {
     base.join("ldwhelper").join("webview-profile")
 }
 
+/// Shutdown del browser condiviso + cancellazione del profilo WebView2
+/// (rilascio lock profilo, cookie/login/cache non persistono su disco).
+/// Sincrono: da chiamare sull'uscita effettiva (menu tray "Esci") prima di
+/// `std::process::exit`. Retry: il processo browser può rilasciare i file
+/// qualche centinaio di ms dopo il Close().
+pub fn shutdown_and_cleanup_profile() {
+    if let Some(handle) = shared_browser()
+        && !handle.shutdown_and_wait(std::time::Duration::from_secs(3))
+    {
+        eprintln!("[exit] ack shutdown non arrivato (timeout): procedo comunque");
+    }
+    let profile = profile_dir();
+    for attempt in 0..5 {
+        match std::fs::remove_dir_all(&profile) {
+            Ok(()) => {
+                eprintln!("[exit] profilo cancellato ({})", profile.display());
+                // Rimuovi anche la cartella padre se rimasta vuota
+                if let Some(parent) = profile.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+                return;
+            }
+            Err(e) if attempt < 4 => {
+                eprintln!("[exit] cancellazione ritentata ({e})");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            Err(e) => {
+                eprintln!("[exit] ERRORE: profilo non cancellato: {e}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

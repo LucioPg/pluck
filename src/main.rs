@@ -9,7 +9,7 @@ mod download;
 mod referers;
 mod ui;
 
-use dioxus::desktop::{Config, WindowBuilder};
+use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,8 +40,13 @@ fn run_ui() {
         builder = builder.with_window_icon(Some(icon));
     }
     // with_menu(None): senza, dioxus-desktop inietta la menu bar di default
-    // (File/Edit/View/Help) anche in release
-    let config = Config::new().with_window(builder).with_menu(None);
+    // (File/Edit/View/Help) anche in release.
+    // WindowHides: la X nasconde la finestra (app in systray); l'uscita vera
+    // è dal menu dell'icona nella tray ("Esci").
+    let config = Config::new()
+        .with_window(builder)
+        .with_menu(None)
+        .with_close_behaviour(WindowCloseBehaviour::WindowHides);
     dioxus::LaunchBuilder::new()
         .with_cfg(config)
         .launch(ui::app::App);
