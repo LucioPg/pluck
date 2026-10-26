@@ -35,6 +35,11 @@ unprotected streams that the browser itself downloads while playing the page.
 - **Automatic mode** — paste a page URL; the embedded browser runs in the background and every media
   candidate it detects is listed with a thumbnail, name, size and type. HLS/DASH playlists are marked
   as streams.
+- **Embedded players** — pages that load the video through an embedded player (Vimeo, YouTube,
+  Dailymotion, Wistia) are supported too: the app scrolls the page to find the player and, when it
+  doesn't start on its own, brings it up so the media can be captured.
+- **Instagram Reels with audio** — Instagram serves the picture and the sound as separate streams;
+  pluck downloads both and merges them into a single MP4 that plays everywhere.
 - **Manual mode** — a plain dialog where you enter a direct media URL, an optional Referer and a
   destination file.
 - **Referer handling** — for automatic downloads the page origin is used as `Referer` (it can be
@@ -53,6 +58,7 @@ unprotected streams that the browser itself downloads while playing the page.
 ## Typical use cases
 
 - Saving a video that plays inside a page, when "view source" does not reveal the file.
+- Saving **Instagram Reels**, with the audio track included.
 - Downloading HLS/DASH streams that require an ffmpeg-based tool, without using the command line.
 - Downloading files that need a specific `Referer` to be served.
 - Quick one-shot downloads from the command line, with the same engine as the GUI.
