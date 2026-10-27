@@ -13,15 +13,15 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-/// (url, referer, destinazione, thumbnail, is_stream, audio_url) — richiesta di
-/// download dal click su candidato fino a `launch_download`.
+/// (url, referer, destinazione, thumbnail, is_stream, bytestream) — richiesta
+/// di download dal click su candidato fino a `launch_download`.
 pub type DownloadRequest = (
     String,
     Option<String>,
     PathBuf,
     Option<String>,
     bool,
-    Option<String>,
+    Option<crate::browser::sniff::BytestreamSource>,
 );
 
 #[component]
@@ -149,7 +149,7 @@ pub fn AutoPage(
                     PathBuf::from(path),
                     thumbnail,
                     candidate.is_stream,
-                    candidate.audio_url,
+                    candidate.bytestream.clone(),
                 ));
             }
             browsing.set(false);

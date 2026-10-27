@@ -25,6 +25,9 @@ pub struct MediaCandidate {
     /// Traccia audio separata (bytestream Instagram): se presente, il download
     /// scarica url (video) + audio_url e li muxa in MP4 con ffmpeg
     pub audio_url: Option<String>,
+    /// Sorgente bytestream (Instagram/Facebook): i range visti dal player da
+    /// scaricare e concatenare in ordine; mux ffmpeg se c'e' la traccia audio
+    pub bytestream: Option<sniff::BytestreamSource>,
 }
 
 impl MediaCandidate {
@@ -37,6 +40,7 @@ impl MediaCandidate {
             url,
             thumbnail: None,
             audio_url: None,
+            bytestream: None,
         }
     }
 }

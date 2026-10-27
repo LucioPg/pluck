@@ -8,8 +8,8 @@
 //! - I comandi arrivano da un canale std mpsc, consumato a ogni giro di pump
 
 use super::sniff::{
-    CandidateSet, InstaPairing, candidate_from_response_received, classify_dom,
-    classify_insta_bytestream, pick_embed_navigate,
+    BytestreamPairing, CandidateSet, candidate_from_response_received, classify_bytestream,
+    classify_dom, focus_video_id_from_url,
 };
 use super::{BrowserCommand, BrowserEvent, BrowserHandle, MediaCandidate};
 use std::collections::HashMap;
@@ -208,7 +208,8 @@ const SCOUT_TICK_JS: &str = r#"
         });
         doc.querySelectorAll('a[href]').forEach(a => {
             const h = a.getAttribute('href') || '';
-            if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|$)/i.test(h) && !window.__lwSeen[h]) {
+            // '/' nel delimiter: /file/x.mp4/?v-acctoken=... (slash prima della query)
+            if (/\.(mp4|webm|mkv|mov|avi|m4v|mpg|mpeg|ts)(\?|#|\/|$)/i.test(h) && !window.__lwSeen[h]) {
                 window.__lwSeen[h] = 1;
                 const im = a.querySelector('img');
                 out.push({ url: h, from_video: false, thumbnail: (im && im.src) || '' });
@@ -234,6 +235,22 @@ const SCOUT_TICK_JS: &str = r#"
                 if (p && p.catch) p.catch(e => out.push({ url: '__play_error__:' + (e && e.name || 'unknown'), from_video: false, thumbnail: '' }));
             }
         });
+        // Player splash (flowplayer/kt_player e simili): il <video> del
+        // contenuto nasce SOLO al click sul layer del player — play() sui
+        // video già presenti (slot advertising) non basta. Un click per
+        // pagina, mai dentro container pubblicitari.
+        if (!window.__lwSplashClicked) {
+            // In ordine di preferenza (querySelector multi-selettore seguirebbe
+            // l'ordine del documento, non della lista): il layer che gestisce
+            // il click prima del container
+            const splash = doc.querySelector('.is-splash .fp-ui')
+                || doc.querySelector('.fp-splash')
+                || doc.querySelector('.is-splash');
+            if (splash && !AD_DOM.test((splash.id || '') + ' ' + (splash.className || ''))) {
+                window.__lwSplashClicked = true;
+                splash.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            }
+        }
         doc.querySelectorAll('iframe').forEach(f => {
             try { collect(f.contentDocument); } catch (e) { /* cross-origin */ }
         });
@@ -452,19 +469,20 @@ fn browser_thread(
         // Dedup CONDIVISO tra scout DOM e CDP (possono vedere lo stesso URL):
         // creato PRIMA delle registrazioni che lo catturano
         let candidates = std::rc::Rc::new(std::cell::RefCell::new(CandidateSet::new(500)));
-        // Accoppiamento bytestream Instagram: le tracce video/audio in arrivo
-        // dal CDP si aggregano qui per asset; il flush avviene ai tick scout
-        let insta_pairs: std::rc::Rc<std::cell::RefCell<HashMap<String, InstaPairing>>> =
+        // Accoppiamento bytestream Meta (Instagram/Facebook): le tracce
+        // video/audio in arrivo dal CDP si aggregano qui per asset; il flush
+        // avviene ai tick scout. Reset a ogni navigazione utente (pump).
+        let insta_pairs: std::rc::Rc<std::cell::RefCell<HashMap<String, BytestreamPairing>>> =
             std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()));
+        // Focus video: l'id del video puntato dall'URL utente (es. /reel/<id>),
+        // per emettere solo il media richiesto e ignorare i video del feed
+        let focus_video_id = std::rc::Rc::new(std::cell::RefCell::new(Option::<String>::None));
+        let focus_reset = focus_video_id.clone();
         // Thumbnail di pagina corrente (og:image/twitter:image/poster): estratta a
         // ogni NavigationCompleted, attaccata come fallback ai candidati CDP (che
         // non hanno contesto DOM). Reset a ogni navigazione (exec).
         let page_thumb: std::rc::Rc<std::cell::RefCell<Option<String>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
-        // Sopprimi PageUrl durante la navigazione automatica agli embed: la barra
-        // indirizzo deve restare con l'URL inserito dall'utente, non col player
-        let suppress_page_url = std::rc::Rc::new(std::cell::Cell::new(false));
-        let suppress_src = suppress_page_url.clone();
         let _ = webview.add_SourceChanged(
             &SourceChangedEventHandler::create(Box::new(move |webview, _args| {
                 if let Some(webview) = webview {
@@ -472,9 +490,7 @@ fn browser_thread(
                     if webview.Source(&mut uri).is_ok() {
                         let url = take_pwstr(uri);
                         eprintln!("[browser] SourceChanged: {url}");
-                        if !suppress_src.get() {
-                            let _ = url_events.send(BrowserEvent::PageUrl(url));
-                        }
+                        let _ = url_events.send(BrowserEvent::PageUrl(url));
                     }
                 }
                 Ok(())
@@ -513,13 +529,8 @@ fn browser_thread(
         // NavigationCompleted) spesso ritorna vuoto (overlay ad nel DOM) — i tick
         // scout riprovano a ogni secondo finché il titolo non esiste
         let title_sent = std::rc::Rc::new(std::cell::Cell::new(false));
-        // Navigazione embed già fatta per la pagina corrente (reset a navigazione):
-        // una sola volta — il player top-level cattura e basta
-        let embed_navigated = std::rc::Rc::new(std::cell::Cell::new(false));
-        let embed_reset = embed_navigated.clone();
         let scout_tick_events = events.clone();
         let scout_tick_candidates = candidates.clone();
-        let embed_tick_navigated = embed_navigated.clone();
         let _ = webview.add_NavigationCompleted(
             &NavigationCompletedEventHandler::create(Box::new({
                 let scout_deadline = scout_deadline.clone();
@@ -580,7 +591,7 @@ fn browser_thread(
                     ));
                     scout_since.set(Some(std::time::Instant::now()));
                     ad_notified.set(false);
-                    embed_reset.set(false);
+                    focus_reset.borrow_mut().take();
                     Ok(())
                 }
             })),
@@ -639,59 +650,20 @@ fn browser_thread(
                                 let json = take_pwstr(json);
                                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
                                 {
-                                    let raw_url = value["response"]["url"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_string();
+                                    let raw_url =
+                                        value["response"]["url"].as_str().unwrap_or("").to_string();
 
-                                    // Bytestream Instagram: video/audio in tracce
-                                    // separate con range request → normalizza e
-                                    // accoppia per asset; il flush avviene ai tick
-                                    if let Some(track) = classify_insta_bytestream(&raw_url) {
+                                    // Bytestream Meta (Instagram/Facebook):
+                                    // video/audio in tracce separate con range
+                                    // request -> normalizza, accoppia per asset;
+                                    // il flush avviene ai tick scout
+                                    if let Some(track) = classify_bytestream(&raw_url) {
                                         let now = std::time::Instant::now();
-                                        let emit = {
-                                            let mut pairs = cdp_pairs.borrow_mut();
-                                            let pair = pairs
-                                                .entry(track.asset_id.clone())
-                                                .or_default();
-                                            pair.update(&track, now);
-                                            if let Some((v, a)) =
-                                                pair.ready_to_flush(now, std::time::Duration::from_secs(6))
-                                            {
-                                                pair.flushed = true;
-                                                Some((v, a))
-                                            } else {
-                                                None
-                                            }
-                                        };
-                                        if let Some((video_url, audio_url)) = emit {
-                                            let mut candidate =
-                                                MediaCandidate::new(video_url, false, true);
-                                            candidate.name = "Instagram reel".into();
-                                            candidate.audio_url = audio_url;
-                                            if candidate.thumbnail.is_none()
-                                                && let Some(t) = cdp_page_thumb.borrow().clone()
-                                            {
-                                                candidate.thumbnail = Some(t);
-                                            }
-                                            if cdp_candidates.borrow_mut().insert(&candidate) {
-                                                eprintln!(
-                                                    "[browser] candidato: {} (stream=false, insta-mux={})",
-                                                    candidate.url,
-                                                    candidate.audio_url.is_some()
-                                                );
-                                                let _ = cdp_events
-                                                    .send(BrowserEvent::Candidate(candidate));
-                                                if cdp_nav_completed.get()
-                                                    && !cdp_ad_active.get()
-                                                {
-                                                    cdp_capture.set(Some(
-                                                        std::time::Instant::now()
-                                                            + CAPTURE_GRACE,
-                                                    ));
-                                                }
-                                            }
-                                        }
+                                        cdp_pairs
+                                            .borrow_mut()
+                                            .entry(track.asset_id.clone())
+                                            .or_default()
+                                            .update(&track, now);
                                         return Ok(());
                                     }
 
@@ -765,10 +737,15 @@ fn browser_thread(
                     return;
                 }
                 eprintln!("[browser] comando ricevuto");
-                // Navigazione richiesta dall'utente: la barra indirizzo torna
-                // a seguire le pagine (il suppress era per gli embed automatici)
-                if matches!(cmd, BrowserCommand::Navigate(_)) {
-                    suppress_page_url.set(false);
+                // Nuova ricerca utente: focus sull'eventuale video della pagina
+                // (es. /reel/<id>) e via le tracce della pagina precedente
+                if let BrowserCommand::Navigate(url) = &cmd {
+                    // Focus sull'eventuale video della pagina (es. /reel/<id>):
+                    // solo quello verra' catturato, ignorando i video del feed
+                    focus_video_id
+                        .borrow_mut()
+                        .replace(focus_video_id_from_url(url).unwrap_or_default());
+                    insta_pairs.borrow_mut().clear();
                 }
                 exec(
                     &controller,
@@ -822,10 +799,9 @@ fn browser_thread(
                     let scout_nav_completed = nav_completed.clone();
                     let scout_title_sent = title_sent.clone();
                     let tick_webview = webview.clone();
-                    let embed_navigated = embed_tick_navigated.clone();
                     let tick_pairs = insta_pairs.clone();
                     let tick_page_thumb = page_thumb.clone();
-                    let suppress_tick = suppress_page_url.clone();
+                    let tick_focus = focus_video_id.clone();
                     let _ = webview.ExecuteScript(
                         &HSTRING::from(SCOUT_TICK_JS),
                         &ExecuteScriptCompletedHandler::create(Box::new(
@@ -879,77 +855,47 @@ fn browser_thread(
                                         }
                                     }
                                 }
-                                // Player embed noti (vimeo/youtube/...): il video
-                                // sta in un iframe cross-origin che nel webview
-                                // invisibile spesso non si carica mai (challenge
-                                // del provider, lazy-load del CMS). Navigare
-                                // direttamente l'URL dell'iframe: come pagina
-                                // top-level il player si carica e cattura
-                                let mut embed_iframes: Vec<String> = Vec::new();
-                                if let Some(arr) = parsed["iframes"].as_array() {
-                                    for f in arr {
-                                        if let Some(src) = f.as_str() {
-                                            embed_iframes.push(src.to_string());
-                                        }
-                                    }
-                                }
-                                let since_nav = scout_since
-                                    .get()
-                                    .map(|t| std::time::Instant::now().duration_since(t));
-                                if let Some(nav) = pick_embed_navigate(
-                                    scout_candidates.borrow().len(),
-                                    since_nav,
-                                    embed_navigated.get(),
-                                    &embed_iframes,
-                                ) {
-                                    eprintln!(
-                                        "[browser] player embed ({}) non caricato: navigo l'iframe",
-                                        nav.player
-                                    );
-                                    embed_navigated.set(true);
-                                    suppress_tick.set(true);
-                                    let url_json =
-                                        serde_json::to_string(&nav.url).unwrap_or_default();
-                                    let _ = tick_webview.ExecuteScript(
-                                        &HSTRING::from(&format!(
-                                            "location.assign({url_json}); 'nav'"
-                                        )),
-                                        &ExecuteScriptCompletedHandler::create(Box::new(|_, _| {
-                                            Ok(())
-                                        })),
-                                    );
-                                }
-                                // Auto-scroll (lazy-load) solo finché nessun
-                                // candidato e nessuna navigazione embed in corso
-                                let allow_scroll =
-                                    scout_candidates.borrow().is_empty() && !embed_navigated.get();
-                                let _ = tick_webview.ExecuteScript(
-                                    &HSTRING::from(&format!(
-                                        "window.__lwAllowScroll = {allow_scroll}"
-                                    )),
-                                    &ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(()))),
-                                );
-                                // Flush coppie bytestream Instagram pronte
-                                // (entrambe le tracce: mux; singola: come arriva)
+                                let focus = tick_focus.borrow().clone();
                                 let flushed = {
                                     let mut pairs = tick_pairs.borrow_mut();
                                     let now = std::time::Instant::now();
-                                    let mut ready: Vec<(String, Option<String>)> = Vec::new();
+                                    let mut ready: Vec<(
+                                        super::sniff::BytestreamProvider,
+                                        Vec<super::sniff::BytestreamRange>,
+                                        Option<Vec<super::sniff::BytestreamRange>>,
+                                    )> = Vec::new();
                                     for pair in pairs.values_mut() {
-                                        if let Some((v, a)) = pair
-                                            .ready_to_flush(now, std::time::Duration::from_secs(6))
-                                        {
+                                        if let Some(cap) = pair.ready_to_flush(
+                                            now,
+                                            std::time::Duration::from_secs(6),
+                                            focus.as_deref(),
+                                        ) {
                                             pair.flushed = true;
-                                            ready.push((v, a));
+                                            ready.push((
+                                                cap.provider,
+                                                cap.video_ranges,
+                                                cap.audio_ranges,
+                                            ));
                                         }
                                     }
                                     ready
                                 };
-                                for (video_url, audio_url) in flushed {
-                                    let mut candidate =
-                                        MediaCandidate::new(video_url.clone(), false, true);
-                                    candidate.name = "Instagram reel".into();
-                                    candidate.audio_url = audio_url;
+                                let had_flushes = !flushed.is_empty();
+                                for (provider, video_ranges, audio_ranges) in flushed {
+                                    let mut candidate = MediaCandidate::new(
+                                        video_ranges
+                                            .first()
+                                            .map(|r| r.url.clone())
+                                            .unwrap_or_default(),
+                                        false,
+                                        true,
+                                    );
+                                    candidate.name = provider.label().into();
+                                    candidate.bytestream = Some(super::sniff::BytestreamSource {
+                                        provider,
+                                        video_ranges,
+                                        audio_ranges,
+                                    });
                                     if candidate.thumbnail.is_none()
                                         && let Some(t) = tick_page_thumb.borrow().clone()
                                     {
@@ -957,9 +903,9 @@ fn browser_thread(
                                     }
                                     if scout_candidates.borrow_mut().insert(&candidate) {
                                         eprintln!(
-                                            "[browser] candidato: {} (stream=false, insta-mux={})",
+                                            "[browser] candidato: {} (bytestream {})",
                                             candidate.url,
-                                            candidate.audio_url.is_some()
+                                            provider.label()
                                         );
                                         let _ =
                                             scout_events.send(BrowserEvent::Candidate(candidate));
@@ -970,6 +916,16 @@ fn browser_thread(
                                         }
                                     }
                                 }
+                                // Auto-scroll (lazy-load) solo finché nessun
+                                // candidato e nessuna cattura bytestream in corso
+                                let allow_scroll =
+                                    scout_candidates.borrow().is_empty() && !had_flushes;
+                                let _ = tick_webview.ExecuteScript(
+                                    &HSTRING::from(&format!(
+                                        "window.__lwAllowScroll = {allow_scroll}"
+                                    )),
+                                    &ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(()))),
+                                );
                                 // Pubblicità attiva: estendi la finestra scout (cap 90s
                                 // dalla navigazione) e segnala all'UI il tentativo in
                                 // corso. Mentre l'ad gira: niente chiusura post-cattura

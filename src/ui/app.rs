@@ -37,7 +37,7 @@ fn launch_download(
     dest: PathBuf,
     thumbnail: Option<String>,
     is_hls: bool,
-    audio_url: Option<String>,
+    bytestream: Option<crate::browser::sniff::BytestreamSource>,
 ) {
     let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
     // Push PRIMA dello spawn: il task può inviare messaggi subito — se l'item
@@ -58,14 +58,8 @@ fn launch_download(
     // normale altrimenti (range HTTP con pausa/ripresa)
     let ctl = if is_hls {
         spawn_hls_download(id, url, referer.clone(), dest, tx)
-    } else if let Some(audio) = &audio_url {
-        crate::download::bytestream::spawn_bytestream_mux_download(
-            id,
-            url,
-            Some(audio.clone()),
-            dest,
-            tx,
-        )
+    } else if let Some(source) = &bytestream {
+        crate::download::bytestream::spawn_bytestream_mux_download(id, source.clone(), dest, tx)
     } else {
         spawn_download(id, url, referer.clone(), dest, tx)
     };
@@ -122,13 +116,13 @@ pub fn App() -> Element {
 
     // Chiusure submit: cloni tx per consumer (le props vogliono FnMut)
     let tx_auto = tx.clone();
-    let auto_on_download = move |(url, referer, dest, thumbnail, is_stream, audio_url): (
+    let auto_on_download = move |(url, referer, dest, thumbnail, is_stream, bytestream): (
         String,
         Option<String>,
         PathBuf,
         Option<String>,
         bool,
-        Option<String>,
+        Option<crate::browser::sniff::BytestreamSource>,
     )| {
         launch_download(
             tx_auto.clone(),
@@ -140,7 +134,7 @@ pub fn App() -> Element {
             dest,
             thumbnail,
             is_stream,
-            audio_url,
+            bytestream,
         );
     };
     let tx_manual = tx.clone();
