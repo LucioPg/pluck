@@ -8,7 +8,7 @@
 ![Stars](https://img.shields.io/github/stars/LucioPg/pluck)
 ![Language](https://img.shields.io/badge/Rust-stable-dea584)
 ![Framework](https://img.shields.io/badge/Dioxus-0.7-blue)
-
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/LucioPg)
 <p align="center">
   <img src="docs/images/app-window.png" width="680" alt="pluck main window">
 </p>
